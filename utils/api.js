@@ -17,14 +17,15 @@ export const generateText = async (
 
     //Initial request
     if (prompt === "Start game") {
-      url = "http://localhost:5001/api/start";
+      url = "http://localhost:5001/api/game/start";
       requestData = {};
     }
 
     const response = await axios.post(url, requestData);
+    console.log("Response from server:", response.data);
     return response.data.response;
   } catch (error) {
     console.error("Error generating text:", error);
-    return "Error: Could not communicate with the server.";
+    // return "Error: Could not communicate with the server.";
   }
 };

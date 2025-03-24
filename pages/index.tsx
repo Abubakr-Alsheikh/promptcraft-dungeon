@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"; // Import useEffect
+import { useState, useEffect } from "react";
 import {
   Container,
   Text,
@@ -8,23 +8,22 @@ import {
   Heading,
   Spinner,
   HStack,
-} from "@chakra-ui/react"; // Add HStack
+} from "@chakra-ui/react";
 import { generateText } from "../utils/api";
 
 export default function Home() {
-  const [roomDescription, setRoomDescription] = useState(""); // Initialize as empty
+  const [roomDescription, setRoomDescription] = useState("");
   const [playerInput, setPlayerInput] = useState("");
   const [messages, setMessages] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [playerHealth, setPlayerHealth] = useState(10); // Add player health
-  const [playerLocation, setPlayerLocation] = useState("start"); // Add player location
+  const [playerHealth, setPlayerHealth] = useState(10);
+  const [playerLocation, setPlayerLocation] = useState("start");
 
-  // Use useEffect to fetch the initial room description when the component mounts
   useEffect(() => {
     const startGame = async () => {
       setIsLoading(true);
       try {
-        const initialDescription = await generateText("Start game"); // Special start prompt
+        const initialDescription = await generateText("Start game");
         setRoomDescription(initialDescription);
         setMessages([initialDescription]);
       } catch (error) {
@@ -34,7 +33,7 @@ export default function Home() {
       }
     };
     startGame();
-  }, []); // Empty dependency array ensures this runs only once on mount
+  }, []);
 
   const handleSubmit = async () => {
     if (!playerInput.trim()) return;
@@ -46,7 +45,7 @@ export default function Home() {
         null,
         roomDescription,
         playerInput
-      ); //Pass parameters
+      );
       setRoomDescription(newDescription);
       setMessages([...messages, `> ${playerInput}`, newDescription]);
       setPlayerInput("");
