@@ -6,6 +6,9 @@ from models import GameState, Player
 
 game_bp = Blueprint("game", __name__)
 
+# Create a single instance of AIService to reuse across requests
+ai_service = AIService()
+
 
 @game_bp.route("/start", methods=["POST"])
 def start_game():
@@ -17,8 +20,8 @@ def start_game():
         player = Player(name=player_name)
         game_state = GameState(player=player, difficulty=difficulty)
 
-        # Generate initial room
-        response = AIService.generate_initial_room(game_state)
+        # Generate initial room using the instance
+        response = ai_service.generate_initial_room(game_state)
 
         return jsonify({"game_state": game_state.to_dict(), "room": response})
 
@@ -37,8 +40,8 @@ def handle_action():
         # Process action and update game state
         updated_state = GameService.process_action(game_state, action)
 
-        # Generate AI response
-        ai_response = AIService.generate_response(updated_state, action)
+        # Generate AI response using the instance
+        ai_response = ai_service.generate_response(updated_state, action)
 
         return jsonify({"game_state": updated_state.to_dict(), "result": ai_response})
 
