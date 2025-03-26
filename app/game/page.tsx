@@ -32,7 +32,6 @@ export default function GamePage() {
         isLoading={isLoadingDescription}
         animate={true} // Enable animation
       />
-      {/* Optional Event Log */}
       <Box>
         <EventLog logs={logs} />
       </Box>

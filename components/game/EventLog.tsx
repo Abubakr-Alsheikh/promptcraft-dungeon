@@ -1,11 +1,5 @@
+import { LogEntry } from "@/types/game";
 import { Box, Text, VStack } from "@chakra-ui/react";
-
-export interface LogEntry {
-  id: string | number; // Unique key for React list
-  text: string;
-  type: "player" | "system" | "narration" | "error"; // For potential styling
-  timestamp?: Date;
-}
 
 interface EventLogProps {
   logs: LogEntry[];

@@ -1,19 +1,20 @@
-import { Box, VStack } from "@chakra-ui/react";
+import { Box, HStack, VStack } from "@chakra-ui/react";
 import { PlayerInput } from "@/components/game/PlayerInput";
-// import { ActionButton } from '@/components/ui/ActionButton'; // If using action buttons
-// import { GiBackpack, GiMagnifyingGlass } from 'react-icons/gi'; // Example icons
+import { ActionButton } from "@/components/ui/ActionButton";
+import { GiBackpack, GiMagnifyingGlass } from "react-icons/gi";
 
 interface GameFooterProps {
   onCommandSubmit: (command: string) => void;
   isProcessingCommand: boolean;
-  // Add props for action button handlers if needed
-  // onLookAction: () => void;
-  // onInventoryAction: () => void;
+  onLookAction: () => void;
+  onInventoryAction: () => void;
 }
 
 export function GameFooter({
   onCommandSubmit,
   isProcessingCommand,
+  onLookAction,
+  onInventoryAction,
 }: GameFooterProps) {
   return (
     <Box
@@ -24,8 +25,8 @@ export function GameFooter({
       borderColor="gray.700"
     >
       <VStack spacing={4}>
-        {/* Optional Quick Action Buttons */}
-        {/* <HStack spacing={3} justify="center">
+        {/* Quick Action Buttons */}
+        <HStack spacing={3} justify="center">
           <ActionButton
             label="Look Around"
             icon={<GiMagnifyingGlass />}
@@ -38,8 +39,7 @@ export function GameFooter({
             onClickAction={onInventoryAction}
             isDisabled={isProcessingCommand}
           />
-          {/* Add more actions as needed */}
-        {/* </HStack> */}
+        </HStack>
 
         <PlayerInput
           onSubmitCommand={onCommandSubmit}

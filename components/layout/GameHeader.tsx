@@ -4,40 +4,59 @@ import {
   Box,
   Spacer,
   IconButton,
-  useDisclosure,
+  HStack,
   Tooltip,
 } from "@chakra-ui/react";
-import { GiCog } from "react-icons/gi"; // Settings icon
+import { GiCog, GiBackpack } from "react-icons/gi";
 import { PlayerStats, PlayerStatsData } from "@/components/game/PlayerStats";
-// import SettingsModal from './SettingsModal'; // Placeholder for a settings modal
 
 interface GameHeaderProps {
-  playerStats: PlayerStatsData; // Pass player stats data here
+  playerStats: PlayerStatsData;
+  onOpenSettings: () => void;
+  onOpenInventory: () => void;
 }
 
-export function GameHeader({ playerStats }: GameHeaderProps) {
-  const { isOpen, onOpen, onClose } = useDisclosure(); // For settings modal
-
+export function GameHeader({
+  playerStats,
+  onOpenSettings,
+  onOpenInventory,
+}: GameHeaderProps) {
   return (
-    <>
-      <Flex
-        as="header"
-        align="center"
-        p={3}
-        bg="brand.bgDark" // Use dark background from theme
-        borderBottomWidth={1}
-        borderColor="brand.primary" // Accent border
-        wrap="wrap" // Allow wrapping on smaller screens
+    <Flex
+      as="header"
+      align="center"
+      p={3}
+      bg="brand.bgDark"
+      borderBottomWidth={1}
+      borderColor="brand.primary"
+      wrap="wrap"
+    >
+      <Heading
+        as="h1"
+        size="md"
+        color="brand.accent"
+        fontFamily="heading"
+        mr={4}
       >
-        <Heading as="h1" size="md" color="brand.accent" fontFamily="heading">
-          PromptCraft: Dungeon Delver
-        </Heading>
-        <Spacer />
-        <Box mx={4}>
-          {" "}
-          {/* Add margin for spacing */}
-          <PlayerStats stats={playerStats} />
-        </Box>
+        PromptCraft: Dungeon Delver
+      </Heading>
+      <Spacer />
+      <Box flexShrink={0} mx={4}>
+        {" "}
+        {/* Prevent player stats from causing wrap too early */}
+        <PlayerStats stats={playerStats} />
+      </Box>
+      <HStack spacing={2}>
+        <Tooltip label="Inventory" placement="bottom" hasArrow>
+          <IconButton
+            aria-label="Open Inventory"
+            icon={<GiBackpack />}
+            variant="ghost"
+            color="gray.400"
+            _hover={{ color: "brand.accent", bg: "gray.700" }}
+            onClick={onOpenInventory}
+          />
+        </Tooltip>
         <Tooltip label="Settings" placement="bottom" hasArrow>
           <IconButton
             aria-label="Game Settings"
@@ -45,11 +64,10 @@ export function GameHeader({ playerStats }: GameHeaderProps) {
             variant="ghost"
             color="gray.400"
             _hover={{ color: "brand.accent", bg: "gray.700" }}
-            onClick={onOpen} // Open settings modal
+            onClick={onOpenSettings}
           />
         </Tooltip>
-      </Flex>
-      {/* <SettingsModal isOpen={isOpen} onClose={onClose} /> */}
-    </>
+      </HStack>
+    </Flex>
   );
 }
