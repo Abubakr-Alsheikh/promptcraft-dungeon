@@ -6,8 +6,8 @@ import { GiBackpack, GiMagnifyingGlass } from "react-icons/gi";
 interface GameFooterProps {
   onCommandSubmit: (command: string) => void;
   isProcessingCommand: boolean;
-  onLookAction: () => void;
-  onInventoryAction: () => void;
+  onLookAction?: () => void;
+  onInventoryAction?: () => void;
 }
 
 export function GameFooter({

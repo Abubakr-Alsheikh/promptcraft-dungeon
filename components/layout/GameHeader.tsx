@@ -11,7 +11,7 @@ import { GiCog, GiBackpack } from "react-icons/gi";
 import { PlayerStats, PlayerStatsData } from "@/components/game/PlayerStats";
 
 interface GameHeaderProps {
-  playerStats: PlayerStatsData;
+  playerStats: PlayerStatsData | null;
   onOpenSettings: () => void;
   onOpenInventory: () => void;
 }

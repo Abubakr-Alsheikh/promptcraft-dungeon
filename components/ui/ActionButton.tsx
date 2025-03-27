@@ -4,7 +4,7 @@ import { ReactNode } from "react";
 interface ActionButtonProps extends ButtonProps {
   label: string;
   icon?: ReactNode;
-  onClickAction: () => void;
+  onClickAction?: () => void;
 }
 
 export function ActionButton({

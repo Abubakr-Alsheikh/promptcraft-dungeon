@@ -4,12 +4,14 @@ import { AnimatedText } from "@/components/feedback/AnimatedText";
 interface DungeonViewProps {
   description: string;
   isLoading?: boolean;
+  speed?: number;
   animate?: boolean;
 }
 
 export function DungeonView({
   description,
   isLoading = false,
+  speed = 50,
   animate = true,
 }: DungeonViewProps) {
   // Use a key based on the description to force re-render/re-animate AnimatedText
@@ -43,6 +45,7 @@ export function DungeonView({
         <AnimatedText
           key={animationKey}
           text={description}
+          speed={speed}
           fontSize="lg"
           lineHeight="tall"
         />

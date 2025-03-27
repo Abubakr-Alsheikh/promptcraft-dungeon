@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Providers } from "./providers";
 import { MedievalSharp, Lato } from "next/font/google";
+import { NotificationProvider } from "@/components/NotificationProvider";
 
 const medievalSharp = MedievalSharp({
   subsets: ["latin"],
@@ -26,7 +27,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${medievalSharp.variable} ${lato.variable}`}>
-        <Providers>{children}</Providers>
+        <NotificationProvider>
+          <Providers>{children}</Providers>
+        </NotificationProvider>
       </body>
     </html>
   );

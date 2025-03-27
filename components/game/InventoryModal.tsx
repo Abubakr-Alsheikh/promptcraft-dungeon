@@ -7,12 +7,12 @@ import {
   ModalBody,
   ModalCloseButton,
   Button,
-  Wrap, // Use Wrap for responsive grid-like layout
+  Wrap,
   WrapItem,
   Text,
   Center,
 } from "@chakra-ui/react";
-import { ItemCard } from "./ItemCard"; // Import Item type and ItemCard
+import { ItemCard } from "./ItemCard";
 import { Item } from "@/types/game";
 
 interface InventoryModalProps {
