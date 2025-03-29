@@ -1,9 +1,9 @@
 import { Button, ButtonProps } from "@chakra-ui/react";
-import { ReactNode } from "react";
+import { ReactElement } from "react";
 
 interface ActionButtonProps extends ButtonProps {
   label: string;
-  icon?: ReactNode;
+  icon?: ReactElement;
   onClickAction?: () => void;
 }
 
@@ -17,7 +17,7 @@ export function ActionButton({
 }: ActionButtonProps) {
   return (
     <Button
-      leftIcon={icon ? <>{icon}</> : undefined}
+      leftIcon={icon}
       onClick={onClickAction}
       isLoading={isLoading}
       isDisabled={isDisabled || isLoading}
