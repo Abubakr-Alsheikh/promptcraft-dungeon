@@ -285,10 +285,3 @@ export const useGameStore = create<GameState & GameActions>()(
     }
   )
 );
-
-// --- Optional: Trigger initial data load ---
-// This ensures data starts loading as soon as the store is imported.
-// Alternatively, call loadInitialData() in a useEffect in _app.tsx or layout.tsx.
-if (typeof window !== "undefined") {
-  useGameStore.getState().loadInitialData();
-}

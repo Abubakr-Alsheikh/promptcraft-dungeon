@@ -56,11 +56,9 @@ export default function GameLayout({ children }: GameLayoutProps) {
   // If useSoundManager had internal ways to change volume (e.g., mute button),
   // you might need an effect to sync back to Zustand, but typically UI drives Zustand first.
 
-  // --- Initial Data Loading ---
-  // Optionally trigger here if not done automatically in the store file
-  // useEffect(() => {
-  //   loadInitialData();
-  // }, [loadInitialData]); // Run once on mount
+  useEffect(() => {
+    loadInitialData();
+  }, [loadInitialData]);
 
   // --- Render Logic ---
   if (isLoadingInitialData || !playerStats) {
