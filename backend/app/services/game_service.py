@@ -1,4 +1,3 @@
-# backend/app/services/game_service.py
 import json
 import logging
 from typing import List, Dict, Any, Optional, Tuple
