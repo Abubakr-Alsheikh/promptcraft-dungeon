@@ -25,7 +25,6 @@ export default function GamePage() {
         animate={animationSpeed > 0}
       />
 
-      {/* Optional Event Log */}
       <Box>
         <EventLog logs={logs} />
       </Box>
