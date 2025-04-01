@@ -23,11 +23,9 @@ class AIService:
         self.gemini_client = None
         if self.gemini_api_key:
             try:
-                # Using the official Google client is generally recommended now
-                # Or stick with OpenAI compatible endpoint if preferred
                 self.gemini_client = OpenAI(
                     api_key=self.gemini_api_key,
-                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",  # Adjust if using specific version/proxy
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                 )
                 logger.info("Gemini client configured via OpenAI compatibility.")
             except Exception as e:
@@ -160,23 +158,38 @@ class AIService:
         """Sends request to local Ollama instance."""
         payload = {
             "model": self.ollama_model,
-            "system": system_prompt,
-            "prompt": user_prompt,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
             "stream": False,
             "format": "json",
         }
         try:
             response = requests.post(
-                f"{self.local_url}/api/generate", json=payload, timeout=self.timeout
+                f"{self.local_url}/api/chat", json=payload, timeout=self.timeout
             )
             response.raise_for_status()
             # Ollama's non-streaming JSON response structure
             response_json = response.json()
-            if "response" in response_json:
+            if (
+                "message" in response_json
+                and isinstance(response_json["message"], dict)
+                and "content" in response_json["message"]
+            ):
+                content = response_json["message"]["content"]
                 logger.debug(
-                    f"Raw local AI response received (length: {len(response_json['response'])})"
+                    f"Extracted local AI response content (length: {len(content)})"
                 )
-                return response_json["response"]  # This should be the JSON string
+                # The content *should* be a JSON formatted string if the model
+                try:
+                    json.loads(content)
+                    logger.debug("Response content is valid JSON.")
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Response content is NOT valid JSON, though requested."
+                    )
+                return content
             else:
                 logger.error(
                     f"Unexpected response structure from local Ollama: {response_json}"
