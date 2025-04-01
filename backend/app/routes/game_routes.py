@@ -1,6 +1,6 @@
 # backend/app/routes/game_routes.py
 import logging
-import json  # Import json
+import json
 from flask import Blueprint, request, jsonify, current_app
 from typing import Optional
 from pydantic import ValidationError
@@ -10,41 +10,32 @@ from ..services.ai_service import AIService
 from ..schemas.game import (
     StartGameRequest,
     CommandRequest,
-    InitialStateResponse,
-    CommandResponse,
-    GameStateSchema,
+    InitialStateResponse,  # Updated Response Schema
+    CommandResponse,  # Updated Response Schema
+    GetStateResponse,  # Schema for GET /state
 )
-from ..extensions import limiter, db  # Import db
-from ..models.game import GameState  # Import GameState model
+from ..extensions import limiter, db
+from ..models.game import GameState
 
 logger = logging.getLogger(__name__)
 game_bp = Blueprint("game", __name__)
 
 
 # --- Dependency Injection (simplified) ---
-# In a larger app, consider Flask-Injector or similar, but manual is fine here.
 def get_ai_service():
-    # Cache instance on app context? For now, create per request or reuse if stateless
     return AIService()
 
 
 def get_game_service():
-    # Create GameService with the AI service instance
     return GameService(ai_service=get_ai_service())
 
 
 # --- Routes ---
 
 
-# This endpoint now aligns with frontend's getInitialState expectation (conceptually)
-# If you want true persistence, this might load based on session/user ID
 @game_bp.route("/start", methods=["POST"])
-@limiter.limit(lambda: current_app.config["RATE_LIMIT"])  # Apply specific rate limit
+@limiter.limit(lambda: current_app.config["RATE_LIMIT"])
 def start_game():
-    """
-    Starts a *new* game session.
-    Frontend equivalent: Kicking off a new adventure.
-    """
     game_service = get_game_service()
     try:
         # Validate request body using Pydantic
@@ -52,7 +43,8 @@ def start_game():
         logger.info(f"Received start game request: {request_data.model_dump()}")
 
         game_state, error = game_service.start_new_game(
-            player_name=request_data.playerName, difficulty=request_data.difficulty
+            player_name=request_data.playerName or "Adventurer",  # Use default if None
+            difficulty=request_data.difficulty or "medium",  # Use default if None
         )
 
         if error or not game_state:
@@ -62,15 +54,14 @@ def start_game():
         # Map the initial backend GameState to the frontend's expected schema
         frontend_state = game_service.get_game_state_for_frontend(game_state)
 
-        # Include the game state ID in the response so frontend can use it for subsequent commands
+        # Construct the response data including the crucial game_id
         response_data = {
             **frontend_state,
-            # Add game_id to be stored by frontend for subsequent calls
-            "game_id": game_state.id,
+            "game_id": game_state.id,  # Include the game_id
             "message": "New game started successfully!",
         }
 
-        # Validate response against schema before sending (good practice)
+        # Validate response against schema before sending
         validated_response = InitialStateResponse.model_validate(response_data)
 
         return jsonify(validated_response.model_dump()), 200
@@ -83,53 +74,50 @@ def start_game():
         return jsonify({"error": "Internal server error", "message": str(e)}), 500
 
 
-# This endpoint aligns with frontend's sendCommand
 @game_bp.route("/command", methods=["POST"])
 @limiter.limit(lambda: current_app.config["RATE_LIMIT"])
 def handle_command():
-    """
-    Handles a player command for an ongoing game session.
-    Frontend equivalent: Sending any player input ('look', 'attack', 'go north').
-    """
     game_service = get_game_service()
     try:
         json_data = request.get_json()
-        # We need the game_id from the frontend now to load the correct state
-        game_id = json_data.get("game_id")
-        if not game_id:
-            return jsonify({"error": "Missing 'game_id' in request"}), 400
-
-        # Validate the rest of the command data
+        # Validate the entire command data using the updated schema
         request_data = CommandRequest.model_validate(json_data)
-        logger.info(f"Received command '{request_data.command}' for game ID {game_id}")
+        game_id = request_data.game_id  # Get game_id from validated data
+        command = request_data.command
 
-        # Process the command using the service
+        logger.info(f"Received command '{command}' for game ID {game_id}")
+
         updated_state, ai_response, error = game_service.handle_player_command(
-            game_state_id=game_id, command=request_data.command
+            game_state_id=game_id, command=command
         )
 
-        # Handle cases where the game state couldn't be processed or AI failed
         if error or not updated_state or not ai_response:
             logger.error(f"Error processing command for game {game_id}: {error}")
-            # Still return *some* state if possible, even on error, maybe the state before the command?
-            # If updated_state exists, use it, otherwise load original? Needs careful thought.
-            # For now, return error clearly.
             status_code = 404 if "not found" in (error or "").lower() else 500
-            # Try to return the last known state if available
             last_known_state_data = {}
-            if (
-                updated_state
-            ):  # If state exists even with error (e.g. AI fail after load)
-                last_known_state_data = game_service.get_game_state_for_frontend(
-                    updated_state
-                )
+            if updated_state:  # Try to map even if AI failed after load
+                try:
+                    last_known_state_data = game_service.get_game_state_for_frontend(
+                        updated_state
+                    )
+                except Exception as map_err:
+                    logger.error(
+                        f"Error mapping state during error handling: {map_err}"
+                    )
 
             return (
                 jsonify(
                     {
                         "error": "Command processing failed",
                         "message": error or "AI failed to respond or internal error.",
-                        **last_known_state_data,  # Send last known state if possible
+                        # Attempt to send last known state details if possible
+                        "playerStats": last_known_state_data.get("playerStats"),
+                        "inventory": last_known_state_data.get("inventory"),
+                        "description": last_known_state_data.get(
+                            "description", "State unclear."
+                        ),
+                        "game_id": game_id,  # Return the game_id even on error
+                        "success": False,
                     }
                 ),
                 status_code,
@@ -140,13 +128,9 @@ def handle_command():
 
         # Construct the response matching CommandResponse schema
         response_data = {
-            "success": True,  # Assume success if no error occurred
-            # Use the primary narrative from AI response
+            "success": True,
             "message": ai_response.action_result_description,
-            # The description might be the same as message, or a more detailed room view
-            "description": frontend_state[
-                "description"
-            ],  # Get description from mapped state
+            "description": frontend_state["description"],
             "playerStats": frontend_state["playerStats"],
             "updatedInventory": frontend_state["inventory"],
             "soundEffect": ai_response.sound_effect,
@@ -166,11 +150,9 @@ def handle_command():
         return jsonify({"error": "Internal server error", "message": str(e)}), 500
 
 
-# Optional: Add an endpoint to explicitly load state if needed
 @game_bp.route("/state/<int:game_id>", methods=["GET"])
-@limiter.limit("10 per minute")  # Less frequent access potentially
+@limiter.limit("10 per minute")
 def get_game_state(game_id: int):
-    """Gets the current state of a specific game session."""
     game_service = get_game_service()
     logger.info(f"Request received for game state ID: {game_id}")
     try:
@@ -182,14 +164,15 @@ def get_game_state(game_id: int):
                 404,
             )
 
-        # Map to frontend schema
         frontend_state = game_service.get_game_state_for_frontend(game_state)
-        response_data = {**frontend_state, "game_id": game_state.id}
+        response_data = {
+            **frontend_state,
+            "game_id": game_state.id,
+            "message": "Current game state retrieved.",
+        }
 
-        # Validate (using GameStateSchema as base for required fields)
-        validated_response = GameStateSchema.model_validate(
-            frontend_state
-        )  # Use the base schema
+        # Validate using the specific GetStateResponse schema
+        validated_response = GetStateResponse.model_validate(response_data)
 
         return jsonify(validated_response.model_dump()), 200
 

@@ -50,20 +50,17 @@ class StartGameRequest(BaseModel):
 
 class CommandRequest(BaseModel):
     command: str = Field(..., min_length=1)  # Ensure command is not empty
-    # We might not need to send the full game state *back* from the frontend
-    # if the backend maintains it (e.g., via session or DB).
-    # However, sending relevant parts can make the backend stateless per request.
-    # For now, assume backend loads state based on context (e.g. session/DB id)
-    # current_game_state_id: Optional[int] = None # If using DB persistence
+    # Frontend MUST send the game_id for subsequent commands
+    game_id: int = Field(..., gt=0)  # Add game_id, ensure it's positive
 
 
 # ---- Response Schemas ----
 
 
-# Matches frontend InitialStateResponse
+# Matches frontend InitialStateResponse expectation after STARTING a game
 class InitialStateResponse(GameStateSchema):
     # Inherits fields from GameStateSchema
-    # Add any other initial state specific fields if needed
+    game_id: int  # Crucial: Backend sends the ID of the created game state
     message: str = "Game started successfully."
 
 
@@ -77,5 +74,10 @@ class CommandResponse(BaseModel):
     playerStats: PlayerStatsSchema  # Updated player stats
     updatedInventory: List[ItemSchema]  # Full updated inventory list
     soundEffect: Optional[str] = None  # Sound effect hint
-    # Optional: Add logs if backend generates them
-    # logs: List[LogEntrySchema] = []
+    game_id: int  # Also return game_id in command response for consistency/verification
+
+
+# Optional: Schema for getting state directly (if used)
+class GetStateResponse(GameStateSchema):
+    game_id: int
+    message: Optional[str] = None
