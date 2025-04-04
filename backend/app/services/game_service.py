@@ -19,12 +19,10 @@ class GameService:
         self, player_name: str, difficulty: str
     ) -> Tuple[Optional[GameState], Optional[str]]:
         """
-        Initializes a new game state, generates the first room via AI, and saves to DB.
-        Returns the initial GameState object and an error message if failed.
+        Initializes a new game state, generates the first room via AI, saves state and initial history.
         """
         logger.info(f"Starting new game for {player_name}, difficulty {difficulty}")
         try:
-            # 1. Create Initial Player and GameState
             player = Player(
                 name=player_name,
                 health=100,
@@ -32,24 +30,26 @@ class GameService:
                 inventory=[],
                 level=1,
                 gold=10,
-            )  # Start with some gold?
+            )
             game_state = GameState(
                 player=player, difficulty=difficulty, rooms_cleared=0
             )
 
-            # 2. Prepare context for initial room generation
+            # Prepare context *just* for initial room generation
             context = self._build_ai_context(
-                game_state, command="start_game"
-            )  # Use a dummy command or None
+                game_state, command="<INITIAL_GENERATION>"
+            )  # Special command context
 
-            # 3. Ask AI Service to generate the initial room description/details
-            # Note: The initial prompt might need a slightly different structure/goal
-            # than the standard action processing prompt.
+            # Generate the initial room using a *separate call* to the AI
+            # We don't have history yet for this first call.
             initial_room_ai_response: Optional[AIResponse] = (
                 self.ai_service.generate_structured_response(
-                    system_prompt_template=BASE_SYSTEM_PROMPT,  # Use base system prompt for consistency
-                    user_prompt=INITIAL_ROOM_PROMPT_USER,  # Specific user prompt for starting room
-                    context=context,
+                    system_prompt_template=BASE_SYSTEM_PROMPT,  # Use the main system prompt
+                    history=[],  # No history for the very first call
+                    user_command=INITIAL_ROOM_PROMPT_USER.format(  # Format the user prompt part
+                        player_name=player_name, difficulty=difficulty
+                    ),
+                    context=context,  # Pass context for system prompt formatting
                 )
             )
 
@@ -57,33 +57,48 @@ class GameService:
                 logger.error("AI failed to generate initial room.")
                 return None, "Failed to generate the starting area with AI."
 
-            # 4. Store the initial room description in the GameState
-            # The initial response might just have a description and maybe minor events.
-            # We store the core description. The concept of a "room object" might just be the description string + exits if needed.
-            # Let's assume the initial prompt returns the room description in action_result_description for simplicity here.
+            # Store initial room description
             initial_description = initial_room_ai_response.action_result_description
             game_state.current_room_json = json.dumps(
-                {  # Store initial room info as JSON
-                    "title": "Beginning",  # Or get from AI if it provides title
+                {
+                    "title": "Beginning",
                     "description": initial_description,
-                    "exits": [],  # Or get from AI if provided
+                    "exits": [],  # AI could potentially suggest exits in initial response
                     "events": [
                         event.model_dump()
                         for event in initial_room_ai_response.triggered_events
-                    ],  # Store initial events
+                    ],
                 }
             )
             logger.debug(f"Initial room generated: {initial_description[:100]}...")
 
-            # 5. Save initial state to Database
+            # --- Initialize Chat History ---
+            # Store the system prompt used and the AI's first response.
+            # We *don't* store the INITIAL_ROOM_PROMPT_USER itself, as it's not a typical user command.
+            # The AI's first output acts as the initial 'assistant' message.
+            formatted_system_prompt = self.ai_service._format_system_prompt(
+                BASE_SYSTEM_PROMPT, context
+            )
+            initial_history = [
+                # System prompt is added dynamically by AI Service now, so history starts with assistant
+                # {'role': 'system', 'content': formatted_system_prompt}, # Optional: Store the first system prompt?
+                {
+                    "role": "assistant",
+                    "content": initial_room_ai_response.model_dump_json(),
+                }
+            ]
+            game_state.chat_history = initial_history  # Use the setter
+
             db.session.add(game_state)
             db.session.commit()
-            logger.info(f"New game state (ID: {game_state.id}) created and saved.")
+            logger.info(
+                f"New game state (ID: {game_state.id}) created and saved with initial history."
+            )
 
-            return game_state, None  # Return the created game state, no error
+            return game_state, None
 
         except Exception as e:
-            db.session.rollback()  # Rollback DB changes on error
+            db.session.rollback()
             logger.exception(f"Error starting new game: {e}")
             return None, f"An unexpected server error occurred: {e}"
 
@@ -91,35 +106,39 @@ class GameService:
         self, game_state_id: int, command: str
     ) -> Tuple[Optional[GameState], Optional[AIResponse], Optional[str]]:
         """
-        Loads game state, sends command+context to AI, applies results, saves state.
-        Returns (updated_game_state, ai_response_object, error_message)
+        Loads game state + history, sends command+context+history to AI, applies results, saves state + history.
         """
         logger.info(f"Handling command '{command}' for game state ID {game_state_id}")
         try:
-            # 1. Load Game State from DB
             game_state: Optional[GameState] = db.session.get(GameState, game_state_id)
             if not game_state or not game_state.player:
-                logger.error(
-                    f"Game state with ID {game_state_id} not found or has no player."
-                )
+                logger.error(f"Game state {game_state_id} not found or has no player.")
                 return None, None, "Game session not found. Please start a new game."
 
-            # 2. Prepare Context for AI
+            # Load existing chat history
+            history = game_state.chat_history  # Use the getter
+            print(history)
+
+            # Prepare Context for AI (used for formatting system prompt)
             context = self._build_ai_context(game_state, command)
             logger.debug(f"AI Context: {context}")
 
-            # 3. Get AI Response
+            # Get AI Response, passing history and current command
             ai_response: Optional[AIResponse] = (
                 self.ai_service.generate_structured_response(
                     system_prompt_template=BASE_SYSTEM_PROMPT,
-                    user_prompt="{player_command}",  # User prompt is just the command itself here
-                    context=context,
+                    history=history,  # Pass the loaded history
+                    user_command=command,  # Pass the raw user command
+                    context=context,  # Pass context for system prompt formatting
                 )
             )
 
             if not ai_response:
                 logger.error(f"AI failed to generate response for command: {command}")
-                # Return current state without changes, but indicate AI failure
+                # Even if AI fails, save the user command attempt in history? Optional.
+                # history.append({'role': 'user', 'content': command})
+                # game_state.chat_history = history
+                # db.session.commit() # Commit the added user message
                 return (
                     game_state,
                     None,
@@ -130,70 +149,65 @@ class GameService:
                 f"AI Response received: {ai_response.model_dump_json(indent=2)}"
             )
 
-            # 4. Apply AI-dictated changes to Game State
-            # Important: Apply effects BEFORE updating the room description
-            # in case effects change stats relevant to the description itself.
+            # --- IMPORTANT: Update History BEFORE applying effects ---
+            # Store the user command and the successful AI response JSON
+            history.append({"role": "user", "content": command})
+            history.append(
+                {"role": "assistant", "content": ai_response.model_dump_json()}
+            )
+            game_state.chat_history = history  # Use the setter to save updated history
+
+            # Apply AI-dictated changes to Game State
             self._apply_ai_effects(game_state.player, ai_response)
 
-            # 5. Update room description / Handle potential room change
-            current_room_data = game_state.current_room or {}  # Get current room dict
+            # Update room description / Handle potential room change
+            current_room_data = game_state.current_room or {}
             if ai_response.new_room_description:
-                # AI indicates a move to a new room/area
-                logger.info(
-                    f"Moving to new room described by AI for game {game_state_id}"
-                )
-                # We might need a new title or the AI could provide one in events/description
+                logger.info(f"Moving to new room for game {game_state_id}")
                 current_room_data["description"] = ai_response.new_room_description
-                # Reset events? Or does the AI response include events for the new room? Assume events are action-specific for now.
-                # The AI prompt should be clear about whether it generates the *entire* new room state or just the description.
-                # For simplicity, let's just update the description. Exits might need explicit asking ("look around").
-                current_room_data["title"] = "New Area"  # Placeholder
-                current_room_data["exits"] = (
-                    []
-                )  # Reset exits? Needs clarification in prompt design.
-                current_room_data["events"] = []  # Clear old room events?
-                game_state.rooms_cleared += (
-                    1  # Increment if move is considered clearing
+                current_room_data["title"] = (
+                    "New Area"  # Or extract from AI response if possible
                 )
+                current_room_data["exits"] = []  # Reset exits? Or expect AI to provide?
+                # Events from the AI response likely relate to the *action*, not the *new room itself*.
+                # Keep the events triggered by the action that *led* to the new room.
+                current_room_data["events"] = [
+                    event.model_dump() for event in ai_response.triggered_events
+                ]
+                game_state.rooms_cleared += 1
             else:
-                # Update description within the *current* room based on action result
-                # Append or replace? Let's assume the AI gives the *new* description of the current situation.
+                # The primary description of the action's result *is* the new situation description
                 current_room_data["description"] = ai_response.action_result_description
-                # We might also want to store the action-specific events here
                 current_room_data["events"] = [
                     event.model_dump() for event in ai_response.triggered_events
                 ]
 
-            game_state.current_room = current_room_data  # Update the GameState object property (triggers setter)
+            game_state.current_room = current_room_data
 
-            # 6. Save Updated State to DB
+            # Save Updated State (includes updated history, player stats, room state)
             db.session.commit()
             logger.info(
-                f"Game state {game_state_id} updated and saved after command '{command}'."
+                f"Game state {game_state_id} updated and saved after command '{command}'. History length: {len(history)}"
             )
 
-            return (
-                game_state,
-                ai_response,
-                None,
-            )  # Return updated state, AI response, no error
+            return game_state, ai_response, None
 
         except Exception as e:
             db.session.rollback()
             logger.exception(
                 f"Error handling command '{command}' for game state {game_state_id}: {e}"
             )
+            # Attempt to return last known state? The state object might be inconsistent here.
+            # Best to return None for state to avoid sending potentially corrupt data.
             return None, None, f"An unexpected server error occurred: {e}"
 
+    # --- _build_ai_context remains largely the same ---
+    # It provides *current snapshot* context for the system prompt, not history.
     def _build_ai_context(self, game_state: GameState, command: str) -> Dict[str, Any]:
-        """Helper to create the context dictionary for AI prompts."""
+        """Helper to create the context dictionary for AI system prompts."""
         player = game_state.player
-        room = game_state.current_room or {
-            "description": "An empty void",
-            "exits": [],
-        }  # Default if no room set
+        room = game_state.current_room or {"description": "An empty void", "exits": []}
 
-        # Format inventory for the prompt (e.g., "Health Potion (2), Rusty Sword (1)")
         inventory_list = []
         for item_dict in player.inventory:
             name = item_dict.get("name", "Unknown Item")
@@ -201,7 +215,8 @@ class GameService:
             inventory_list.append(f"{name} ({qty})")
         inventory_str = ", ".join(inventory_list) if inventory_list else "Empty"
 
-        return {
+        # Only include keys expected by BASE_SYSTEM_PROMPT format()
+        context = {
             "difficulty": game_state.difficulty,
             "player_name": player.name,
             "health": player.health,
@@ -209,12 +224,13 @@ class GameService:
             "level": player.level,
             "inventory": inventory_str,
             "current_room_description": room.get(
-                "description", "You are in an featureless location."
+                "description", "You are in a featureless location."
             ),
             "current_room_exits": ", ".join(room.get("exits", [])),
-            "player_command": command,
-            # Add any other relevant state: time of day, active quests, status effects etc.
+            "player_command": command,  # The *current* command being processed
         }
+        # logger.debug(f"Built context for AI: {context}") # Optional: very verbose
+        return context
 
     def _apply_ai_effects(self, player: Player, ai_response: AIResponse):
         """Applies effects from AI events to the player state."""

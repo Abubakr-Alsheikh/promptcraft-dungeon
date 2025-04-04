@@ -1,7 +1,8 @@
 import json
+import string
 import requests
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from flask import current_app  # Use current_app to access config
 from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 
@@ -78,45 +79,70 @@ class AIService:
         formatted_user = user_prompt.format(**context)
         return formatted_system, formatted_user
 
+    def _format_system_prompt(self, system_template: str, context: dict) -> str:
+        # Use string.Formatter().parse to extract template keys
+        template_keys = {
+            fname
+            for _, fname, _, _ in string.Formatter().parse(system_template)
+            if fname
+        }
+        filtered_context = {k: v for k, v in context.items() if k in template_keys}
+        try:
+            return system_template.format(**filtered_context)
+        except KeyError as e:
+            logger.error(
+                f"Missing key in context for system prompt formatting: {e}. Context: {filtered_context}"
+            )
+            return system_template  # Fallback: return template with unresolved placeholders
+
     def generate_structured_response(
-        self, system_prompt_template: str, user_prompt: str, context: Dict[str, Any]
+        self,
+        system_prompt_template: str,
+        history: List[Dict[str, str]],  # Add history parameter
+        user_command: str,  # The current command from the user
+        context: Dict[str, Any],
     ) -> Optional[AIResponse]:
         """
-        Generates a response from the LLM, attempts to parse it into the AIResponse model.
+        Generates a response from the LLM using chat history, attempts to parse it.
         Handles fallback between local and Gemini.
         """
-        system_prompt, user_prompt_formatted = self._format_prompt(
-            system_prompt_template, user_prompt, context
-        )
+        # Format the system prompt using the *current* context
+        # This ensures the AI always gets the latest player/room state info
+        # even though it also has the history.
+        system_prompt = self._format_system_prompt(system_prompt_template, context)
         logger.debug(f"Formatted System Prompt Snippet: {system_prompt[:200]}...")
-        logger.debug(f"Formatted User Prompt: {user_prompt_formatted}")
+        logger.debug(f"Current User Command: {user_command}")
+        logger.debug(f"Using History (length): {len(history)}")
+
+        # --- Construct the full message list for the AI ---
+        # Convention: History contains past user/assistant turns.
+        # We prepend the *latest* formatted system prompt and append the *current* user command.
+        messages = (
+            [{"role": "system", "content": system_prompt}]
+            + history
+            + [{"role": "user", "content": user_command}]
+        )
 
         raw_response_str = None
-        use_local_for_this_call = (
-            self.use_local and self._check_local_ollama()
-        )  # Re-check ensures it's currently up
+        use_local_for_this_call = self.use_local and self._check_local_ollama()
 
         if use_local_for_this_call:
             logger.info(f"Attempting query to local Ollama model: {self.ollama_model}")
             try:
-                raw_response_str = self._query_local(
-                    system_prompt, user_prompt_formatted
-                )
+                # Pass the full message list to the query method
+                raw_response_str = self._query_local(messages)
             except Exception as e:
                 logger.error(f"Local Ollama query failed: {e}. Falling back to Gemini.")
-                use_local_for_this_call = False  # Ensure fallback happens
+                use_local_for_this_call = False
 
-        # Fallback to Gemini if local failed or wasn't selected/available
         if not use_local_for_this_call:
             if self.gemini_client:
                 logger.info(f"Attempting query to Gemini model: {self.gemini_model}")
                 try:
-                    raw_response_str = self._query_gemini(
-                        system_prompt, user_prompt_formatted
-                    )
+                    # Pass the full message list to the query method
+                    raw_response_str = self._query_gemini(messages)
                 except Exception as e:
                     logger.error(f"Gemini query failed: {e}")
-                    # No further fallback, error out
                     return None
             else:
                 logger.error(
@@ -124,20 +150,18 @@ class AIService:
                 )
                 return None
 
+        # ... (rest of the parsing logic remains the same) ...
         if not raw_response_str:
             logger.error("Received empty response from AI service.")
             return None
 
-        # --- Response Parsing ---
         try:
-            # Clean potential markdown code blocks ```json ... ```
             if raw_response_str.strip().startswith("```json"):
                 raw_response_str = raw_response_str.strip()[7:-3].strip()
             elif raw_response_str.strip().startswith("```"):
                 raw_response_str = raw_response_str.strip()[3:-3].strip()
 
             response_data = json.loads(raw_response_str)
-            # Validate and parse using Pydantic
             ai_response_obj = AIResponse.model_validate(response_data)
             logger.debug(
                 f"Successfully parsed AI response: {ai_response_obj.model_dump_json(indent=2)}"
@@ -148,29 +172,28 @@ class AIService:
                 f"Failed to decode AI JSON response: {e}\nRaw response:\n{raw_response_str}"
             )
             return None
-        except Exception as e:  # Catch Pydantic validation errors or others
+        except Exception as e:
             logger.error(
                 f"Failed to validate AI response against Pydantic model: {e}\nRaw response:\n{raw_response_str}"
             )
             return None
 
-    def _query_local(self, system_prompt: str, user_prompt: str) -> Optional[str]:
-        """Sends request to local Ollama instance."""
+    # --- Modify query methods to accept the full message list ---
+
+    def _query_local(self, messages: List[Dict[str, str]]) -> Optional[str]:
+        """Sends request to local Ollama instance using the message list."""
         payload = {
             "model": self.ollama_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            "messages": messages,  # Pass the constructed list
             "stream": False,
             "format": "json",
         }
+        # ... (rest of _query_local remains the same, using the payload) ...
         try:
             response = requests.post(
                 f"{self.local_url}/api/chat", json=payload, timeout=self.timeout
             )
             response.raise_for_status()
-            # Ollama's non-streaming JSON response structure
             response_json = response.json()
             if (
                 "message" in response_json
@@ -181,14 +204,7 @@ class AIService:
                 logger.debug(
                     f"Extracted local AI response content (length: {len(content)})"
                 )
-                # The content *should* be a JSON formatted string if the model
-                try:
-                    json.loads(content)
-                    logger.debug("Response content is valid JSON.")
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "Response content is NOT valid JSON, though requested."
-                    )
+                # Validate JSON here if needed, though parsing happens later
                 return content
             else:
                 logger.error(
@@ -204,22 +220,19 @@ class AIService:
             logger.error(f"Local Ollama request failed: {e}")
             raise ConnectionError(f"Failed to connect to local LLM: {e}")
 
-    def _query_gemini(self, system_prompt: str, user_prompt: str) -> Optional[str]:
-        """Sends request to Gemini via OpenAI compatible endpoint."""
+    def _query_gemini(self, messages: List[Dict[str, str]]) -> Optional[str]:
+        """Sends request to Gemini via OpenAI compatible endpoint using the message list."""
         if not self.gemini_client:
             raise ConnectionError("Gemini client not initialized.")
         try:
-            # Using Chat Completions endpoint
             response = self.gemini_client.chat.completions.create(
-                model=self.gemini_model,  # Use the specific model name from config
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                model=self.gemini_model,
+                messages=messages,  # Pass the constructed list
             )
             result = response.choices[0].message.content
             logger.debug(f"Raw Gemini AI response received (length: {len(result)})")
             return result
+        # ... (rest of _query_gemini exception handling remains the same) ...
         except APITimeoutError:
             logger.error(f"Gemini request timed out after {self.timeout} seconds.")
             raise TimeoutError("Gemini request timed out")
@@ -228,9 +241,7 @@ class AIService:
             raise ConnectionError(f"Failed to connect to Gemini: {e}")
         except RateLimitError as e:
             logger.error(f"Gemini rate limit exceeded: {e}")
-            raise ConnectionError(
-                f"Gemini rate limit exceeded: {e}"
-            )  # Treat as connection issue for retry logic if any
+            raise ConnectionError(f"Gemini rate limit exceeded: {e}")
         except Exception as e:
             logger.error(f"Gemini API request failed: {e}")
             raise RuntimeError(f"Gemini API error: {e}")

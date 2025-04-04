@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional, Any
+import json
+from typing import List, Dict, Optional, Any, TypedDict
+
+from flask import current_app
 from ..extensions import db  # Import db instance
 
 # --- Core Data Models (Consider using SQLAlchemy for DB persistence) ---
@@ -67,6 +70,11 @@ class Player(db.Model):
         return player
 
 
+class ChatMessage(TypedDict):
+    role: str  # 'system', 'user', 'assistant'
+    content: str
+
+
 class GameState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     player = db.relationship(
@@ -75,6 +83,7 @@ class GameState(db.Model):
     difficulty = db.Column(db.String(50), nullable=False, default="medium")
     current_room_json = db.Column(db.Text, nullable=True)  # Store current room as JSON
     rooms_cleared = db.Column(db.Integer, nullable=False, default=0)
+    chat_history_json = db.Column(db.Text, nullable=True)
     # Add session ID or user ID if implementing multi-user persistence
     # user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
@@ -99,6 +108,42 @@ class GameState(db.Model):
             self.current_room_json = None
         else:
             self.current_room_json = json.dumps(value)
+
+    @property
+    def chat_history(
+        self,
+    ) -> List[Dict[str, str]]:  # Use Dict for simplicity or ChatMessage
+        """Load chat history from JSON."""
+        if self.chat_history_json:
+            try:
+                history = json.loads(self.chat_history_json)
+                # Basic validation: ensure it's a list of dicts with 'role' and 'content'
+                if isinstance(history, list) and all(
+                    isinstance(msg, dict) and "role" in msg and "content" in msg
+                    for msg in history
+                ):
+                    return history
+                else:
+                    # Log error or return default if structure is invalid
+                    current_app.logger.warning(
+                        f"Invalid chat history JSON structure for game {self.id}. Resetting."
+                    )
+                    return []
+            except json.JSONDecodeError:
+                current_app.logger.error(
+                    f"Failed to decode chat history JSON for game {self.id}. Resetting."
+                )
+                return []
+        return []  # Return empty list if no history stored yet
+
+    @chat_history.setter
+    def chat_history(self, value: List[Dict[str, str]]):
+        """Save chat history as JSON."""
+        if value is None:
+            self.chat_history_json = None
+        else:
+            # Optional: Add validation before saving if needed
+            self.chat_history_json = json.dumps(value)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert GameState model to dictionary."""
