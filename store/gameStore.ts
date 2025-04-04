@@ -1,405 +1,55 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { PlayerStatsData, Item, LogEntry } from "@/types/game";
-import {
-  apiClient,
-  StartGameApiResponse,
-  CommandApiResponse,
-} from "@/lib/apiClient";
-import { useNotificationStore } from "@/hooks/useNotifications";
+import { GameStoreState } from "@/types/gameStore"; // Import the combined type
 
-// Define the state shape
-interface GameState {
-  // Core Game Data
-  gameId: number | null; // Added to store the ID from the backend
-  playerStats: PlayerStatsData | null;
-  inventory: Item[];
-  description: string;
-  logs: LogEntry[];
+// Import slice creators
+import { createGameStateSlice } from "./slices/gameStateSlice";
+import { createItemSlice } from "./slices/itemSlice";
+import { createUISlice } from "./slices/uiSlice";
+import { createSettingsSlice } from "./slices/settingsSlice";
+import { createSoundSlice } from "./slices/soundSlice";
 
-  // UI / Meta State
-  isStartingGame: boolean; // More specific loading state for start
-  isProcessingCommand: boolean;
-  isInventoryOpen: boolean;
-  isSettingsOpen: boolean;
-  animationSpeed: number;
-  masterVolume: number;
-  effectsVolume: number;
-
-  lastSoundEffect: string | null;
-}
-
-// Define the actions
-interface GameActions {
-  startGame: (playerName: string, difficulty: string) => Promise<boolean>; // Returns true on success, false on error
-  // Core Gameplay
-  sendCommand: (command: string) => Promise<void>;
-  useItem: (itemId: string) => Promise<void>;
-  equipItem: (itemId: string) => Promise<void>;
-  dropItem: (itemId: string) => Promise<void>;
-
-  // UI Control
-  toggleInventory: (open?: boolean) => void;
-  toggleSettings: (open?: boolean) => void;
-
-  // Settings Persistence
-  setAnimationSpeed: (speed: number) => void;
-  setMasterVolume: (volume: number) => void;
-  setEffectsVolume: (volume: number) => void;
-  _addLog: (log: Omit<LogEntry, "id" | "timestamp">) => void;
-  resetGameState: () => void; // Action to reset state for a new game
-  clearLastSoundEffect: () => void;
-}
-
-const initialGameState: Omit<
-  GameState, // Persisted settings are handled by persist middleware
-  "animationSpeed" | "masterVolume" | "effectsVolume" | "lastSoundEffect"
-> = {
-  gameId: null, // Start with no game ID
-  playerStats: null,
-  inventory: [],
-  description: "Prepare for your adventure...", // Initial placeholder before start
-  logs: [],
-  isStartingGame: false,
-  isProcessingCommand: false,
-  isInventoryOpen: false,
-  isSettingsOpen: false,
-};
-
-export const useGameStore = create<GameState & GameActions>()(
+export const useGameStore = create<GameStoreState>()(
   persist(
-    (set, get) => ({
-      ...initialGameState, // Non-persisted initial state
-      // Persisted state defaults (will be overwritten by localStorage if present)
-      animationSpeed: 30,
-      masterVolume: 70,
-      effectsVolume: 80,
-      lastSoundEffect: null,
-
-      // --- Actions Implementation ---
-
-      startGame: async (playerName, difficulty) => {
-        const { notifySuccess, notifyError } = useNotificationStore.getState();
-        set({ isStartingGame: true, description: "Generating your world..." });
-        get()._addLog({ type: "system", text: "Starting new game..." });
-
-        try {
-          const response: StartGameApiResponse = await apiClient.startGame({
-            playerName: playerName || undefined, // Send undefined if empty, backend uses default
-            difficulty: difficulty,
-          });
-
-          console.log("startGame response received:", response);
-
-          set({
-            gameId: response.game_id, // Store the game ID!
-            playerStats: response.playerStats,
-            inventory: response.inventory,
-            description: response.description,
-            isStartingGame: false,
-            logs: [
-              // Reset logs for new game
-              { id: 0, type: "system", text: response.message },
-              { id: 1, type: "narration", text: response.description },
-            ],
-          });
-          notifySuccess("Game Started!", response.message);
-          set({ lastSoundEffect: null });
-          return true; // Indicate success
-        } catch (error: any) {
-          console.error("Failed to start game:", error);
-          const errorMessage =
-            error.message ||
-            "Failed to start game. Check connection or server.";
-          notifyError("Error Starting Game", errorMessage);
-          set({
-            description: `Error: ${errorMessage}. Please try again.`,
-            isStartingGame: false,
-            gameId: null, // Ensure gameId is null on error
-          });
-          get()._addLog({
-            type: "error",
-            text: `Failed to start: ${errorMessage}`,
-          });
-          return false; // Indicate failure
-        }
-      },
-
-      sendCommand: async (command) => {
-        const { gameId, isProcessingCommand } = get();
-        if (isProcessingCommand) return;
-        if (!gameId) {
-          console.error("Cannot send command: gameId is null.");
-          get()._addLog({
-            type: "error",
-            text: "Error: No active game session.",
-          });
-          return;
-        }
-
-        const { notifySuccess, notifyError } = useNotificationStore.getState();
-        const previousDescription = get().description;
-
-        set({ isProcessingCommand: true });
-        get()._addLog({ type: "player", text: `> ${command}` });
-
-        try {
-          // Pass gameId to the API client
-          const result: CommandApiResponse = await apiClient.sendCommand({
-            command,
-            game_id: gameId,
-          });
-
-          console.log("sendCommand response received:", result);
-
-          if (result.success) {
-            // Update state with results
-            set({
-              description: result.description,
-              playerStats: result.playerStats,
-              inventory: result.updatedInventory, // Use the correct key from response
-              isProcessingCommand: false,
-            });
-            get()._addLog({ type: "narration", text: result.message });
-            // Optional: Play sound effect via sound manager using result.soundEffect
-            notifySuccess("Action", result.message); // Simple notification for action message
-          } else {
-            // Handle structured failure from backend
-            notifyError(
-              "Action Failed",
-              result.message || "The attempt failed."
-            );
-            set({
-              description: result.description || previousDescription, // Show AI's description of failure, or revert
-              playerStats: result.playerStats, // Update stats even on failure
-              inventory: result.updatedInventory, // Update inventory even on failure
-              isProcessingCommand: false,
-            });
-            get()._addLog({
-              type: "error",
-              text: result.message || "Action failed.",
-            });
-          }
-        } catch (error: any) {
-          console.error("Error sending command:", error);
-          const errorMessage =
-            error.message || "Failed to communicate with the server.";
-          notifyError("API Error", errorMessage);
-          set({
-            description: previousDescription, // Revert description on API error
-            isProcessingCommand: false,
-          });
-          get()._addLog({
-            type: "error",
-            text: `Server communication failed: ${errorMessage}`,
-          });
-        }
-      },
-
-      // --- Item Actions (Needs gameId passed to apiClient) ---
-      useItem: async (itemId) => {
-        const { gameId, inventory, isProcessingCommand } = get();
-        const item = inventory.find((i) => i.id === itemId);
-        if (!item || !item.canUse || isProcessingCommand || !gameId) return;
-
-        console.log(
-          `Attempting to use item: ${item.name} (ID: ${itemId}) in game ${gameId}`
-        );
-        get()._addLog({ type: "system", text: `Using ${item.name}...` });
-        set({ isProcessingCommand: true, lastSoundEffect: null }); // Set loading, clear sound
-
-        try {
-          // -------------------------------------------------------------
-          // TODO: Implement Backend API Endpoint for using items
-          // const response = await apiClient.useItem({ itemId, game_id: gameId });
-          // Handle response similar to sendCommand (update state, log, notify, set sound)
-          // Example (REMOVE THIS PLACEHOLDER):
-          const response: CommandApiResponse = {
-            // Placeholder Response
-            success: true,
-            message: `You used the ${item.name}.`,
-            playerStats: {
-              ...get().playerStats!,
-              currentHp: Math.min(
-                get().playerStats!.maxHp,
-                get().playerStats!.currentHp + 10
-              ),
-            },
-            updatedInventory: inventory
-              .map((i) =>
-                i.id === itemId ? { ...i, quantity: i.quantity - 1 } : i
-              )
-              .filter((i) => i.quantity > 0),
-            description: `A faint warmth spreads through you after using the ${item.name}.`,
-            soundEffect: "potion_drink", // Example sound
-            game_id: gameId,
-          };
-          // -------------------------------------------------------------
-
-          if (response.success) {
-            set({
-              description: response.description,
-              playerStats: response.playerStats,
-              inventory: response.updatedInventory,
-              isProcessingCommand: false,
-              lastSoundEffect: response.soundEffect || null,
-            });
-            get()._addLog({ type: "narration", text: response.message });
-            useNotificationStore
-              .getState()
-              .notifySuccess("Item Used", response.message);
-          } else {
-            // Handle failure case from backend
-            throw new Error(response.message || "Failed to use item.");
-          }
-        } catch (error: any) {
-          console.error(`Error using item ${itemId}:`, error);
-          get()._addLog({
-            type: "error",
-            text: `Failed to use ${item.name}: ${error.message}`,
-          });
-          useNotificationStore
-            .getState()
-            .notifyError("Use Failed", error.message);
-          set({ isProcessingCommand: false }); // Clear loading on error
-        } finally {
-          // Ensure inventory modal closes regardless of success/failure
-          get().toggleInventory(false);
-        }
-      },
-
-      equipItem: async (itemId) => {
-        const { gameId, inventory, isProcessingCommand } = get();
-        const item = inventory.find((i) => i.id === itemId);
-        if (!item || !item.canEquip || isProcessingCommand || !gameId) return;
-
-        console.warn(
-          `Equip item functionality not fully implemented for: ${item.name}`
-        );
-        get()._addLog({
-          type: "system",
-          text: `Attempting to equip ${item.name}...`,
-        });
-        // TODO: Set loading state
-        try {
-          // TODO: Implement API call: apiClient.equipItem({ itemId, game_id: gameId })
-          // TODO: Handle CommandApiResponse to update state (stats, inventory - potentially marking equipped, description, sound)
-          useNotificationStore
-            .getState()
-            .notifyInfo("Equip", "Equip action needs backend implementation.");
-        } catch (error: any) {
-          // TODO: Error handling
-          useNotificationStore
-            .getState()
-            .notifyError("Equip Failed", error.message);
-        } finally {
-          // TODO: Clear loading state
-          get().toggleInventory(false);
-        }
-      },
-
-      dropItem: async (itemId) => {
-        const { gameId, inventory, isProcessingCommand } = get();
-        const item = inventory.find((i) => i.id === itemId);
-        if (!item || !item.canDrop || isProcessingCommand || !gameId) return;
-
-        // Simple confirmation (optional)
-        if (
-          !window.confirm(
-            `Are you sure you want to drop ${item.name}? It might be lost forever.`
-          )
-        ) {
-          return;
-        }
-
-        console.warn(
-          `Drop item functionality not fully implemented for: ${item.name}`
-        );
-        get()._addLog({
-          type: "system",
-          text: `Attempting to drop ${item.name}...`,
-        });
-        // TODO: Set loading state
-        try {
-          // TODO: Implement API call: apiClient.dropItem({ itemId, quantity: item.quantity, game_id: gameId }) // Send quantity?
-          // TODO: Handle CommandApiResponse (update inventory, description, sound)
-          useNotificationStore
-            .getState()
-            .notifyInfo("Drop", "Drop action needs backend implementation.");
-        } catch (error: any) {
-          // TODO: Error handling
-          useNotificationStore
-            .getState()
-            .notifyError("Drop Failed", error.message);
-        } finally {
-          // TODO: Clear loading state
-          get().toggleInventory(false);
-        }
-      },
-
-      // --- UI Actions ---
-      toggleInventory: (open) =>
-        set((state) => ({
-          isInventoryOpen: open !== undefined ? open : !state.isInventoryOpen,
-        })),
-      toggleSettings: (open) =>
-        set((state) => ({
-          isSettingsOpen: open !== undefined ? open : !state.isSettingsOpen,
-        })),
-
-      // --- Settings Actions ---
-      setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
-      setMasterVolume: (volume) => set({ masterVolume: volume }),
-      setEffectsVolume: (volume) => set({ effectsVolume: volume }),
-
-      // --- NEW Action ---
-      clearLastSoundEffect: () => set({ lastSoundEffect: null }),
-
-      // --- Internal log helper ---
-      _addLog: (logData) => {
-        const newLog: LogEntry = {
-          ...logData,
-          id: Date.now() + Math.random(),
-          timestamp: new Date(),
-        };
-        const maxLogs = 100; // Increased max logs
-        set((state) => ({ logs: [...state.logs, newLog].slice(-maxLogs) }));
-      },
-
-      // --- Reset Game State ---
-      resetGameState: () => {
-        set({ ...initialGameState }); // Reset non-persisted state
-        get()._addLog({ type: "system", text: "Game state reset." });
-        console.log("Game state reset.");
-      },
+    (set, get, api) => ({
+      // Combine slices by calling their creator functions
+      ...createGameStateSlice(set, get),
+      ...createItemSlice(set, get),
+      ...createUISlice(set, get),
+      ...createSettingsSlice(set, get),
+      ...createSoundSlice(set, get),
+      // Add any state/actions here that *don't* fit neatly into a slice (if any)
     }),
     {
-      name: "promptcraft-settings",
+      name: "promptcraft-settings", // Persistence key
       storage: createJSONStorage(() => localStorage),
+      // Only persist settings and potentially the gameId for session resume
       partialize: (state) => ({
-        gameId: state.gameId,
+        gameId: state.gameId, // Persist gameId to allow resuming
         animationSpeed: state.animationSpeed,
         masterVolume: state.masterVolume,
         effectsVolume: state.effectsVolume,
+        // Note: Don't persist transient state like isProcessingCommand, logs, description, etc.
       }),
+      // onRehydrateStorage is optional, used for logging or side effects after hydration
       onRehydrateStorage: () => {
-        console.log("Settings hydration finished.");
+        console.log("Hydration from localStorage starting...");
         return (state, error) => {
           if (error) {
-            console.error("Error rehydrating settings:", error);
+            console.error("Error rehydrating game store:", error);
           } else if (state) {
-            // You could potentially trigger actions based on rehydrated settings here
-            // For example, applying the initial volume to the sound manager
-            // Although the GameLayout effect already does this.
-            console.log("Settings rehydrated:", {
+            console.log("Game store rehydrated successfully:", {
               gameId: state.gameId,
               animationSpeed: state.animationSpeed,
               masterVolume: state.masterVolume,
               effectsVolume: state.effectsVolume,
             });
+            // Potential: If gameId exists, maybe fetch initial state?
+            // Be careful not to overwrite state unnecessarily if starting fresh.
           }
         };
       },
+      skipHydration: false, // Ensure hydration runs
     }
   )
 );
