@@ -25,6 +25,8 @@ interface GameState {
   animationSpeed: number;
   masterVolume: number;
   effectsVolume: number;
+
+  lastSoundEffect: string | null;
 }
 
 // Define the actions
@@ -46,11 +48,12 @@ interface GameActions {
   setEffectsVolume: (volume: number) => void;
   _addLog: (log: Omit<LogEntry, "id" | "timestamp">) => void;
   resetGameState: () => void; // Action to reset state for a new game
+  clearLastSoundEffect: () => void;
 }
 
 const initialGameState: Omit<
   GameState, // Persisted settings are handled by persist middleware
-  "animationSpeed" | "masterVolume" | "effectsVolume"
+  "animationSpeed" | "masterVolume" | "effectsVolume" | "lastSoundEffect"
 > = {
   gameId: null, // Start with no game ID
   playerStats: null,
@@ -71,6 +74,7 @@ export const useGameStore = create<GameState & GameActions>()(
       animationSpeed: 30,
       masterVolume: 70,
       effectsVolume: 80,
+      lastSoundEffect: null,
 
       // --- Actions Implementation ---
 
@@ -100,6 +104,7 @@ export const useGameStore = create<GameState & GameActions>()(
             ],
           });
           notifySuccess("Game Started!", response.message);
+          set({ lastSoundEffect: null });
           return true; // Indicate success
         } catch (error: any) {
           console.error("Failed to start game:", error);
@@ -197,38 +202,139 @@ export const useGameStore = create<GameState & GameActions>()(
         const item = inventory.find((i) => i.id === itemId);
         if (!item || !item.canUse || isProcessingCommand || !gameId) return;
 
-        // TODO: Implement API Call like:
-        // await apiClient.useItem({ itemId, game_id: gameId });
-        // Then update state based on the CommandApiResponse
+        console.log(
+          `Attempting to use item: ${item.name} (ID: ${itemId}) in game ${gameId}`
+        );
+        get()._addLog({ type: "system", text: `Using ${item.name}...` });
+        set({ isProcessingCommand: true, lastSoundEffect: null }); // Set loading, clear sound
 
-        console.warn("useItem API call not implemented yet.");
+        try {
+          // -------------------------------------------------------------
+          // TODO: Implement Backend API Endpoint for using items
+          // const response = await apiClient.useItem({ itemId, game_id: gameId });
+          // Handle response similar to sendCommand (update state, log, notify, set sound)
+          // Example (REMOVE THIS PLACEHOLDER):
+          const response: CommandApiResponse = {
+            // Placeholder Response
+            success: true,
+            message: `You used the ${item.name}.`,
+            playerStats: {
+              ...get().playerStats!,
+              currentHp: Math.min(
+                get().playerStats!.maxHp,
+                get().playerStats!.currentHp + 10
+              ),
+            },
+            updatedInventory: inventory
+              .map((i) =>
+                i.id === itemId ? { ...i, quantity: i.quantity - 1 } : i
+              )
+              .filter((i) => i.quantity > 0),
+            description: `A faint warmth spreads through you after using the ${item.name}.`,
+            soundEffect: "potion_drink", // Example sound
+            game_id: gameId,
+          };
+          // -------------------------------------------------------------
+
+          if (response.success) {
+            set({
+              description: response.description,
+              playerStats: response.playerStats,
+              inventory: response.updatedInventory,
+              isProcessingCommand: false,
+              lastSoundEffect: response.soundEffect || null,
+            });
+            get()._addLog({ type: "narration", text: response.message });
+            useNotificationStore
+              .getState()
+              .notifySuccess("Item Used", response.message);
+          } else {
+            // Handle failure case from backend
+            throw new Error(response.message || "Failed to use item.");
+          }
+        } catch (error: any) {
+          console.error(`Error using item ${itemId}:`, error);
+          get()._addLog({
+            type: "error",
+            text: `Failed to use ${item.name}: ${error.message}`,
+          });
+          useNotificationStore
+            .getState()
+            .notifyError("Use Failed", error.message);
+          set({ isProcessingCommand: false }); // Clear loading on error
+        } finally {
+          // Ensure inventory modal closes regardless of success/failure
+          get().toggleInventory(false);
+        }
+      },
+
+      equipItem: async (itemId) => {
+        const { gameId, inventory, isProcessingCommand } = get();
+        const item = inventory.find((i) => i.id === itemId);
+        if (!item || !item.canEquip || isProcessingCommand || !gameId) return;
+
+        console.warn(
+          `Equip item functionality not fully implemented for: ${item.name}`
+        );
         get()._addLog({
           type: "system",
-          text: `Attempted to use ${item.name} (offline simulation)`,
+          text: `Attempting to equip ${item.name}...`,
         });
-        // Placeholder offline logic
-        let newStats = get().playerStats;
-        if (item.name.toLowerCase().includes("health potion")) {
-          newStats = {
-            ...newStats!,
-            currentHp: Math.min(newStats!.maxHp, newStats!.currentHp + 20),
-          };
+        // TODO: Set loading state
+        try {
+          // TODO: Implement API call: apiClient.equipItem({ itemId, game_id: gameId })
+          // TODO: Handle CommandApiResponse to update state (stats, inventory - potentially marking equipped, description, sound)
+          useNotificationStore
+            .getState()
+            .notifyInfo("Equip", "Equip action needs backend implementation.");
+        } catch (error: any) {
+          // TODO: Error handling
+          useNotificationStore
+            .getState()
+            .notifyError("Equip Failed", error.message);
+        } finally {
+          // TODO: Clear loading state
+          get().toggleInventory(false);
         }
-        const updatedInventory = get()
-          .inventory.map((i) =>
-            i.id === itemId ? { ...i, quantity: i.quantity - 1 } : i
-          )
-          .filter((i) => i.quantity > 0);
-        set({ inventory: updatedInventory, playerStats: newStats });
-        get().toggleInventory(false);
       },
-      equipItem: async (itemId) => {
-        /* TODO: Implement API Call */ console.warn(
-          "equipItem not implemented"
-        );
-      },
+
       dropItem: async (itemId) => {
-        /* TODO: Implement API Call */ console.warn("dropItem not implemented");
+        const { gameId, inventory, isProcessingCommand } = get();
+        const item = inventory.find((i) => i.id === itemId);
+        if (!item || !item.canDrop || isProcessingCommand || !gameId) return;
+
+        // Simple confirmation (optional)
+        if (
+          !window.confirm(
+            `Are you sure you want to drop ${item.name}? It might be lost forever.`
+          )
+        ) {
+          return;
+        }
+
+        console.warn(
+          `Drop item functionality not fully implemented for: ${item.name}`
+        );
+        get()._addLog({
+          type: "system",
+          text: `Attempting to drop ${item.name}...`,
+        });
+        // TODO: Set loading state
+        try {
+          // TODO: Implement API call: apiClient.dropItem({ itemId, quantity: item.quantity, game_id: gameId }) // Send quantity?
+          // TODO: Handle CommandApiResponse (update inventory, description, sound)
+          useNotificationStore
+            .getState()
+            .notifyInfo("Drop", "Drop action needs backend implementation.");
+        } catch (error: any) {
+          // TODO: Error handling
+          useNotificationStore
+            .getState()
+            .notifyError("Drop Failed", error.message);
+        } finally {
+          // TODO: Clear loading state
+          get().toggleInventory(false);
+        }
       },
 
       // --- UI Actions ---
@@ -245,6 +351,9 @@ export const useGameStore = create<GameState & GameActions>()(
       setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
       setMasterVolume: (volume) => set({ masterVolume: volume }),
       setEffectsVolume: (volume) => set({ effectsVolume: volume }),
+
+      // --- NEW Action ---
+      clearLastSoundEffect: () => set({ lastSoundEffect: null }),
 
       // --- Internal log helper ---
       _addLog: (logData) => {
