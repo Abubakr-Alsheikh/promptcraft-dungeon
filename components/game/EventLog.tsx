@@ -1,5 +1,6 @@
 import { LogEntry } from "@/types/game";
 import { Box, Text, VStack } from "@chakra-ui/react";
+import { useEffect, useRef } from "react";
 
 interface EventLogProps {
   logs: LogEntry[];
@@ -8,6 +9,7 @@ interface EventLogProps {
 
 export function EventLog({ logs, maxEntries = 20 }: EventLogProps) {
   const displayedLogs = logs.slice(-maxEntries);
+  const logContainerRef = useRef<HTMLDivElement>(null);
 
   const getLogColor = (type: LogEntry["type"]) => {
     switch (type) {
@@ -22,6 +24,25 @@ export function EventLog({ logs, maxEntries = 20 }: EventLogProps) {
         return "gray.400";
     }
   };
+  const getLogIcon = (type: LogEntry["type"]) => {
+    switch (type) {
+      case "player":
+        return "👤";
+      case "system":
+        return "🤖";
+      case "error":
+        return "❌";
+      case "narration":
+      default:
+        return "📜";
+    }
+  };
+  // Effect to scroll to bottom when logs change
+  useEffect(() => {
+    if (logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [logs]);
 
   return (
     <Box
@@ -54,6 +75,7 @@ export function EventLog({ logs, maxEntries = 20 }: EventLogProps) {
             whiteSpace="pre-wrap"
           >
             {/* Optional: Add prefix based on type */}
+            {getLogIcon(log.type)}
             {log.type === "player" && "> "}
             {log.text}
           </Text>
