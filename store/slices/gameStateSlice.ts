@@ -1,3 +1,4 @@
+// store/slices/gameStateSlice.ts
 import {
   GameStateSliceState,
   GameStateSliceActions,
@@ -17,6 +18,7 @@ const initialGameStateSliceState: GameStateSliceState = {
   playerStats: null,
   inventory: [],
   description: "Prepare for your adventure...",
+  roomTitle: null, // Initialize roomTitle
   logs: [],
   isStartingGame: false,
   isProcessingCommand: false,
@@ -33,25 +35,28 @@ export const createGameStateSlice: SliceCreator<
       id: Date.now() + Math.random(),
       timestamp: new Date(),
     };
-    const maxLogs = 100; // Increased max logs
+    const maxLogs = 100; // Keep max logs
     set((state) => ({ logs: [...state.logs, newLog].slice(-maxLogs) }));
   },
 
   resetGameState: () => {
-    set({ ...initialGameStateSliceState, logs: [] }); // Reset state, clear logs
-    get()._addLog({ type: "system", text: "Game state reset." }); // Use the internal log action
+    set({
+      ...initialGameStateSliceState,
+      logs: [], // Clear logs explicitly on reset
+      roomTitle: null, // Reset roomTitle
+    });
+    get()._addLog({ type: "system", text: "Game state reset." });
     console.log("Game state reset.");
   },
 
   startGame: async (playerName, difficulty) => {
     const { notifySuccess, notifyError } = useNotificationStore.getState();
-    // Reset state *before* API call when starting a fresh game via UI
-    // Note: resetGameState() is separate, called explicitly from HomePage now
     set({
       isStartingGame: true,
       description: "Generating your world...",
-      logs: [], // Clear logs on new game start attempt
-      gameId: null, // Ensure no stale gameId
+      roomTitle: "Loading...", // Set initial title during load
+      logs: [],
+      gameId: null,
       playerStats: null,
       inventory: [],
     });
@@ -68,16 +73,16 @@ export const createGameStateSlice: SliceCreator<
       set({
         gameId: response.game_id,
         playerStats: response.playerStats,
-        inventory: response.inventory,
-        description: response.description,
+        inventory: response.inventory, // Use 'inventory' key from response
+        description: response.description, // Set persistent description
+        roomTitle: response.roomTitle || "Unknown Area", // Set room title, provide default
         isStartingGame: false,
       });
       // Add initial logs after successful start
-      get()._addLog({ type: "system", text: response.message });
-      get()._addLog({ type: "narration", text: response.description });
+      get()._addLog({ type: "system", text: response.message }); // Welcome message
+      get()._addLog({ type: "narration", text: response.description }); // Initial room description log
 
       notifySuccess("Game Started!", response.message);
-      // set({ lastSoundEffect: null }); // Move sound logic to soundSlice/itemSlice
       return true; // Indicate success
     } catch (error: any) {
       console.error("Failed to start game:", error);
@@ -86,11 +91,12 @@ export const createGameStateSlice: SliceCreator<
       notifyError("Error Starting Game", errorMessage);
       set({
         description: `Error: ${errorMessage}. Please try again.`,
+        roomTitle: "Error", // Indicate error in title
         isStartingGame: false,
-        gameId: null, // Ensure gameId is null on error
+        gameId: null,
         playerStats: null,
         inventory: [],
-        logs: [], // Clear logs on error too
+        logs: [],
       });
       get()._addLog({
         type: "error",
@@ -101,7 +107,7 @@ export const createGameStateSlice: SliceCreator<
   },
 
   sendCommand: async (command) => {
-    const { gameId, isProcessingCommand } = get(); // Get from full state
+    const { gameId, isProcessingCommand } = get();
     if (isProcessingCommand) return;
     if (!gameId) {
       console.error("Cannot send command: gameId is null.");
@@ -113,7 +119,9 @@ export const createGameStateSlice: SliceCreator<
     }
 
     const { notifySuccess, notifyError } = useNotificationStore.getState();
+    // Store previous state in case of API error (optional, but good practice)
     const previousDescription = get().description;
+    const previousRoomTitle = get().roomTitle;
 
     set({ isProcessingCommand: true });
     get()._addLog({ type: "player", text: `> ${command}` });
@@ -126,33 +134,40 @@ export const createGameStateSlice: SliceCreator<
 
       console.log("sendCommand response received:", result);
 
+      // Update state based on successful response
       set({
-        description: result.description,
+        description: result.description, // Update persistent description
+        roomTitle: result.roomTitle || previousRoomTitle || "Unknown Area", // Update title, keep previous if null, provide default
         playerStats: result.playerStats,
-        inventory: result.updatedInventory,
+        inventory: result.updatedInventory, // Use 'updatedInventory' key
         isProcessingCommand: false,
-        // Update sound effect via set, handled by sound slice potentially
-        lastSoundEffect: result.soundEffect || null,
+        lastSoundEffect: result.soundEffect || null, // Handle sound effect
       });
 
-      if (result.success) {
+      // Add the action result message to the log
+      if (result.message) {
         get()._addLog({ type: "narration", text: result.message });
-        notifySuccess("Action", result.message);
+      }
+
+      // Show notification based on success flag
+      if (result.success) {
+        // Use result.message for notification if available and meaningful
+        notifySuccess("Action", result.message || "Action completed.");
       } else {
         // Handle structured failure from backend
-        get()._addLog({
-          type: "error",
-          text: result.message || "Action failed.",
-        });
-        notifyError("Action Failed", result.message || "The attempt failed.");
+        const failureMsg = result.message || "Action failed.";
+        get()._addLog({ type: "error", text: failureMsg });
+        notifyError("Action Failed", failureMsg);
       }
     } catch (error: any) {
       console.error("Error sending command:", error);
       const errorMessage =
         error.message || "Failed to communicate with the server.";
       notifyError("API Error", errorMessage);
+      // Revert description/title on error? Optional.
       set({
-        description: previousDescription, // Revert description on API error
+        // description: previousDescription, // Option to revert
+        // roomTitle: previousRoomTitle,   // Option to revert
         isProcessingCommand: false,
       });
       get()._addLog({

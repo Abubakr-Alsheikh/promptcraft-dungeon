@@ -1,3 +1,4 @@
+// types/gameStore.d.ts
 import { PlayerStatsData, Item, LogEntry } from "@/types/game";
 
 // --- Slice Interfaces (Define the shape of each part) ---
@@ -6,7 +7,8 @@ export interface GameStateSliceState {
   gameId: number | null;
   playerStats: PlayerStatsData | null;
   inventory: Item[];
-  description: string;
+  description: string; // Persistent room/location description
+  roomTitle: string | null; // Title of the current room/location
   logs: LogEntry[];
   isStartingGame: boolean;
   isProcessingCommand: boolean;
@@ -19,7 +21,7 @@ export interface GameStateSliceActions {
   resetGameState: () => void;
 }
 
-export type ItemSliceState = unknown;
+export type ItemSliceState = unknown; // Assuming no state directly owned here
 
 export interface ItemSliceActions {
   useItem: (itemId: string) => Promise<void>;
@@ -75,7 +77,7 @@ export type GameStoreCreator = (
   set: import("zustand").StoreApi<GameStoreState>["setState"],
   get: import("zustand").StoreApi<GameStoreState>["getState"],
   api: import("zustand").StoreApi<GameStoreState>
-) => GameStoreState; // Or combine slice types directly if preferred
+) => GameStoreState;
 
 // Type for individual slice creators
 export type SliceCreator<T> = (
