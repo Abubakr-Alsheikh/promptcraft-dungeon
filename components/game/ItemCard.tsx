@@ -23,9 +23,17 @@ interface ItemCardProps {
 export function ItemCard({ item, onUse, onEquip, onDrop }: ItemCardProps) {
   const theme = useTheme();
 
-  // Map rarity to Chakra color scheme defined in theme.ts
-  const rarityColorScheme =
-    (item.rarity as keyof typeof theme.colors.rarity) || "gray";
+  // Determine the Rarity Color directly from the theme
+  const rarityColor =
+    theme.colors.rarity?.[item.rarity as keyof typeof theme.colors.rarity] ?? // Access theme using rarity name
+    theme.colors.gray?.[400] ?? // Sensible fallback using theme's gray
+    "#A0AEC0"; // Ultimate fallback color value if gray.400 also missing
+
+  // Use this theme-defined color for both the border and the badge background
+  const borderColor = rarityColor;
+  const badgeBgColor = rarityColor;
+
+  const badgeTextColor = "white";
 
   const handleUse = () => onUse && onUse(item.id);
   const handleEquip = () => onEquip && onEquip(item.id);
@@ -38,22 +46,20 @@ export function ItemCard({ item, onUse, onEquip, onDrop }: ItemCardProps) {
         borderRadius="md"
         p={3}
         bg="whiteAlpha.100"
-        borderColor={theme.colors.rarity[rarityColorScheme] || "gray.600"}
+        borderColor={borderColor as string}
         _hover={{ bg: "whiteAlpha.200", shadow: "md" }}
-        w="full" // Take full width in grid/wrap
+        w="full"
       >
         <VStack align="stretch" spacing={2}>
           <HStack justify="space-between">
             {/* Icon/Image */}
             <Box boxSize="40px" mr={3} flexShrink={0}>
               {item.icon ? (
-                // Example: Using react-icons based on name (needs mapping)
-                // Or use <Image src={item.icon} alt={item.name} /> for image paths
                 <Icon
                   as={GiPerspectiveDiceSixFacesRandom}
                   boxSize="full"
                   color="gray.400"
-                /> // Placeholder
+                />
               ) : (
                 <Icon
                   as={GiPerspectiveDiceSixFacesRandom}
@@ -69,10 +75,12 @@ export function ItemCard({ item, onUse, onEquip, onDrop }: ItemCardProps) {
                 {item.name}
               </Text>
               <Badge
-                colorScheme={rarityColorScheme}
-                variant="solid"
+                bg={badgeBgColor as string}
+                color={badgeTextColor}
                 fontSize="xs"
                 textTransform="capitalize"
+                px={2}
+                borderRadius="sm"
               >
                 {item.rarity}
               </Badge>
@@ -93,7 +101,7 @@ export function ItemCard({ item, onUse, onEquip, onDrop }: ItemCardProps) {
               borderTopWidth={1}
               borderColor="whiteAlpha.200"
             >
-              <Spacer /> {/* Push buttons to the right */}
+              <Spacer />
               {item.canUse && onUse && (
                 <Button
                   size="xs"

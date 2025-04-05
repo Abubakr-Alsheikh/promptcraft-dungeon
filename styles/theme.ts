@@ -1,4 +1,8 @@
-import { extendTheme, type ThemeConfig } from "@chakra-ui/react";
+import {
+  extendTheme,
+  StyleFunctionProps,
+  type ThemeConfig,
+} from "@chakra-ui/react";
 
 // Define color palette (adjust these to fit the desired dungeon aesthetic)
 const colors = {
@@ -45,7 +49,7 @@ const theme = extendTheme({
         fontWeight: "bold",
       },
       variants: {
-        solid: (props) => ({
+        solid: (props: StyleFunctionProps) => ({
           bg: props.colorMode === "dark" ? "brand.primary" : "brand.secondary",
           color: "white",
           _hover: {
@@ -57,7 +61,7 @@ const theme = extendTheme({
     },
   },
   styles: {
-    global: (props) => ({
+    global: (props: StyleFunctionProps) => ({
       body: {
         bg: props.colorMode === "dark" ? "brand.bgDark" : "brand.bgLight",
         color:

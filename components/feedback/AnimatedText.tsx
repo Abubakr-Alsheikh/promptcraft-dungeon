@@ -1,8 +1,11 @@
 import { useState, useEffect } from "react";
-import { Text, TextProps } from "@chakra-ui/react";
-import { motion } from "framer-motion";
+import { Text, TextProps, chakra, shouldForwardProp } from "@chakra-ui/react";
+import { isValidMotionProp, motion } from "framer-motion";
 
-const MotionText = motion(Text);
+const MotionText = chakra(motion(Text), {
+  shouldForwardProp: (prop) =>
+    isValidMotionProp(prop) || shouldForwardProp(prop),
+});
 
 interface AnimatedTextProps extends TextProps {
   text: string;
@@ -41,7 +44,6 @@ export function AnimatedText({
     <MotionText
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }} // Fade in the container
       whiteSpace="pre-wrap" // Preserve line breaks from the LLM
       {...rest}
     >

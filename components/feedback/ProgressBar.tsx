@@ -3,7 +3,6 @@ import {
   Text,
   VStack,
   ProgressLabel,
-  useTheme,
   ThemingProps,
 } from "@chakra-ui/react";
 
@@ -22,7 +21,6 @@ export function ProgressBar({
   colorScheme = "yellow", // Default to accent color
   showValue = true,
 }: ProgressBarProps) {
-  const theme = useTheme();
   const percentage = max > 0 ? (value / max) * 100 : 0;
 
   // Determine color based on value (example for HP)
@@ -42,7 +40,7 @@ export function ProgressBar({
         <Text
           fontSize="sm"
           fontWeight="bold"
-          color="brand.textLight"
+          color="brand.text"
           casing="uppercase"
         >
           {label}
