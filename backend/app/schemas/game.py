@@ -1,41 +1,45 @@
+# backend/app/schemas/game.py
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
 # --- Pydantic Schemas for API Request/Response Validation ---
 
 
-# Represents the structure expected in apiClient.ts Item type
 class ItemSchema(BaseModel):
     id: str
     name: str
     description: str
     quantity: int
-    rarity: str  # Consider Enum later: "common" | "uncommon" | "rare" | "epic" | "legendary"
+    rarity: str = "common"  # Default value
     icon: Optional[str] = None
     canUse: Optional[bool] = False
     canEquip: Optional[bool] = False
-    canDrop: Optional[bool] = False
+    canDrop: Optional[bool] = True  # Default canDrop to True
+
+    model_config = {
+        "extra": "ignore"  # Tolerate extra fields if they come from DB JSON
+    }
 
 
-# Represents the structure expected in apiClient.ts PlayerStatsData
 class PlayerStatsSchema(BaseModel):
     currentHp: int
     maxHp: int
     gold: int
-    xp: Optional[int] = 0
-    maxXp: Optional[int] = 100  # Or calculated based on level
-    level: Optional[int] = 1
-    # Optional: Add status effects, mana, etc.
+    xp: int = 0  # Default XP to 0
+    maxXp: int = 100  # Default maxXp
+    level: int = 1  # Default level
+
+    model_config = {"extra": "ignore"}
 
 
 # Represents the core GameState needed by the frontend (subset of backend model)
 class GameStateSchema(BaseModel):
     playerStats: PlayerStatsSchema
     inventory: List[ItemSchema]
-    description: str  # The current room/situation description from the AI
-    # Optional: Add current room details if needed beyond description (e.g., exits)
-    # current_room_title: Optional[str] = None
-    # available_exits: Optional[List[str]] = None
+    description: str  # The current room/situation description (persistent)
+    roomTitle: Optional[str] = None  # Add the title of the current room/area
+
+    model_config = {"extra": "ignore"}
 
 
 # ---- Request Schemas ----
@@ -43,41 +47,50 @@ class GameStateSchema(BaseModel):
 
 class StartGameRequest(BaseModel):
     playerName: Optional[str] = Field("Adventurer", max_length=50)
-    difficulty: Optional[str] = Field(
-        "medium", pattern="^(easy|medium|hard)$"
-    )  # Example validation
+    difficulty: Optional[str] = Field("medium", pattern="^(easy|medium|hard)$")
 
 
 class CommandRequest(BaseModel):
-    command: str = Field(..., min_length=1)  # Ensure command is not empty
-    # Frontend MUST send the game_id for subsequent commands
-    game_id: int = Field(..., gt=0)  # Add game_id, ensure it's positive
+    command: str = Field(..., min_length=1)
+    game_id: int = Field(..., gt=0)
 
 
 # ---- Response Schemas ----
 
 
+# Base for state responses (GET /state, POST /start)
+class BaseStateResponse(GameStateSchema):
+    game_id: int
+    message: str  # Context-specific message (e.g., "Game started", "State retrieved")
+
+
 # Matches frontend InitialStateResponse expectation after STARTING a game
-class InitialStateResponse(GameStateSchema):
-    # Inherits fields from GameStateSchema
-    game_id: int  # Crucial: Backend sends the ID of the created game state
-    message: str = "Game started successfully."
+class InitialStateResponse(BaseStateResponse):
+    message: str = "Game started successfully."  # Override message default
 
 
 # Matches frontend CommandResponse
 class CommandResponse(BaseModel):
     success: bool
-    message: (
-        str  # High-level outcome message (e.g., "You moved north.", "Attack failed.")
+    message: str = Field(
+        ...,
+        description="Narrative result of the player's last action (from AI's action_result_description).",
     )
-    description: str  # The *new* narrative description from the AI
+    description: str = Field(
+        ...,
+        description="Current description of the player's location (persistent room description).",
+    )
     playerStats: PlayerStatsSchema  # Updated player stats
     updatedInventory: List[ItemSchema]  # Full updated inventory list
-    soundEffect: Optional[str] = None  # Sound effect hint
-    game_id: int  # Also return game_id in command response for consistency/verification
-
-
-# Optional: Schema for getting state directly (if used)
-class GetStateResponse(GameStateSchema):
+    roomTitle: Optional[str] = Field(
+        None, description="The title of the current room/location."
+    )
+    soundEffect: Optional[str] = None
     game_id: int
-    message: Optional[str] = None
+
+    model_config = {"extra": "ignore"}
+
+
+# Schema for GET /state/<id> response
+class GetStateResponse(BaseStateResponse):
+    message: str = "Current game state retrieved."  # Override message default
