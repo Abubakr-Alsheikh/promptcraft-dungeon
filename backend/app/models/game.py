@@ -1,170 +1,208 @@
-from dataclasses import dataclass, field, asdict
 import json
-from typing import List, Dict, Optional, Any, TypedDict
-
+import datetime
+from typing import List, Dict, Optional, Any
 from flask import current_app
-from ..extensions import db  # Import db instance
+from sqlalchemy.orm import relationship, Mapped, mapped_column
+from sqlalchemy import (
+    ForeignKey,
+    Text,
+    String,
+    Integer,
+    DateTime,
+    JSON,
+)
 
-# --- Core Data Models (Consider using SQLAlchemy for DB persistence) ---
-
-
-class Player(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(80), nullable=False, default="Adventurer")
-    health = db.Column(db.Integer, nullable=False, default=100)
-    max_health = db.Column(db.Integer, nullable=False, default=100)
-    inventory_json = db.Column(db.Text, nullable=True)  # Store inventory as JSON string
-    experience = db.Column(db.Integer, nullable=False, default=0)
-    level = db.Column(db.Integer, nullable=False, default=1)
-    gold = db.Column(db.Integer, nullable=False, default=0)
-    game_state_id = db.Column(
-        db.Integer, db.ForeignKey("game_state.id"), nullable=True
-    )  # Link to GameState
-
-    @property
-    def inventory(self) -> List[Dict[str, Any]]:
-        """Load inventory from JSON."""
-        if self.inventory_json:
-            import json
-
-            try:
-                return json.loads(self.inventory_json)
-            except json.JSONDecodeError:
-                return []
-        return []
-
-    @inventory.setter
-    def inventory(self, value: List[Dict[str, Any]]):
-        """Save inventory as JSON."""
-        import json
-
-        self.inventory_json = json.dumps(value)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert Player model to dictionary."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "currentHp": self.health,
-            "maxHp": self.max_health,
-            "inventory": self.inventory,
-            "xp": self.experience,
-            # maxXp calculation might depend on level, add logic if needed
-            "maxXp": 100 * self.level,  # Example calculation
-            "level": self.level,
-            "gold": self.gold,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        """Create Player instance from dictionary (useful for initial creation)."""
-        player = cls(
-            name=data.get("name", "Adventurer"),
-            health=data.get("currentHp", 100),
-            max_health=data.get("maxHp", 100),
-            experience=data.get("xp", 0),
-            level=data.get("level", 1),
-            gold=data.get("gold", 0),
-        )
-        player.inventory = data.get("inventory", [])  # Use the setter
-        return player
+from ..extensions import db
 
 
-class ChatMessage(TypedDict):
-    role: str  # 'system', 'user', 'assistant'
-    content: str
-
-
-class GameState(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    player = db.relationship(
-        "Player", backref="game_state", uselist=False, cascade="all, delete-orphan"
+# --- Item Definition ---
+# Represents a type of item that can exist in the game.
+# This could later be expanded into a more complex item template system.
+class Item(db.Model):
+    __tablename__ = "items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Unique identifier string (e.g., 'health_potion', 'rusty_sword')
+    item_key: Mapped[str] = mapped_column(
+        String(80), unique=True, nullable=False, index=True
     )
-    difficulty = db.Column(db.String(50), nullable=False, default="medium")
-    current_room_json = db.Column(db.Text, nullable=True)  # Store current room as JSON
-    rooms_cleared = db.Column(db.Integer, nullable=False, default=0)
-    chat_history_json = db.Column(db.Text, nullable=True)
-    # Add session ID or user ID if implementing multi-user persistence
-    # user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)  # Display name
+    description: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    # Store properties like usable, equippable, rarity, icon etc. as JSON?
+    properties: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
+    # Relationship back to inventory entries (one item type can be in many players' inventories)
+    inventory_entries: Mapped[List["PlayerInventoryItem"]] = relationship(
+        back_populates="item"
+    )
+
+    def __repr__(self):
+        return f"<Item {self.item_key} ({self.name})>"
+
+
+# --- Player Inventory Association ---
+# Links Players to Items and stores the quantity.
+class PlayerInventoryItem(db.Model):
+    __tablename__ = "player_inventory"
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), primary_key=True)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    # Relationships to Player and Item
+    player: Mapped["Player"] = relationship(back_populates="inventory_items")
+    item: Mapped["Item"] = relationship(back_populates="inventory_entries")
+
+    def __repr__(self):
+        return f"<PlayerInventoryItem player_id={self.player_id} item_id={self.item_id} qty={self.quantity}>"
+
+
+# --- Player Model ---
+# Represents the player character.
+class Player(db.Model):
+    __tablename__ = "players"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False, default="Adventurer")
+    health: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    max_health: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    experience: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    gold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Link to the GameState this player belongs to
+    game_state_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("game_states.id"), nullable=True
+    )
+
+    # Relationship to inventory items (replaces inventory_json)
+    # cascade="all, delete-orphan": If player is deleted, their inventory entries are also deleted.
+    inventory_items: Mapped[List["PlayerInventoryItem"]] = relationship(
+        back_populates="player", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self):
+        return f"<Player id={self.id} name={self.name} game={self.game_state_id}>"
+
+
+# --- Chat Message Log ---
+# Stores the history of interactions within a game session.
+class ChatMessage(db.Model):
+    __tablename__ = "chat_messages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    game_state_id: Mapped[int] = mapped_column(
+        ForeignKey("game_states.id"), nullable=False, index=True
+    )
+    turn_number: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )  # To maintain order reliably
+    role: Mapped[str] = mapped_column(
+        String(20), nullable=False
+    )  # 'system', 'user', 'assistant'
+    # Content can be simple text (user) or potentially JSON string (assistant AI response)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime.datetime] = mapped_column(
+        DateTime, default=datetime.datetime.utcnow, nullable=False
+    )
+
+    # Relationship back to the GameState
+    game_state: Mapped["GameState"] = relationship(back_populates="chat_messages")
+
+    def __repr__(self):
+        return f"<ChatMessage id={self.id} game={self.game_state_id} turn={self.turn_number} role={self.role}>"
+
+
+# --- Game State Model ---
+# Represents the overall state of a single game session.
+class GameState(db.Model):
+    __tablename__ = "game_states"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    difficulty: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="medium"
+    )
+    rooms_cleared: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Store current room details as JSON. This is a compromise:
+    # Easier for AI to dynamically define rooms, but harder to query room specifics.
+    # If room structure becomes stable or needs querying, create a Room model.
+    current_room_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Link to the Player associated with this game state
+    # cascade: If GameState is deleted, the associated Player is also deleted.
+    # uselist=False: One-to-one relationship (a GameState has one Player)
+    player: Mapped["Player"] = relationship(
+        backref=db.backref(
+            "game_state", uselist=False
+        ),  # Simple backref for Player -> GameState access
+        cascade="all, delete-orphan",
+    )
+
+    # Relationship to chat history messages (replaces chat_history_json)
+    # cascade: If GameState is deleted, its ChatMessages are also deleted.
+    # order_by: Ensures messages are loaded in the correct order.
+    chat_messages: Mapped[List["ChatMessage"]] = relationship(
+        back_populates="game_state",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.turn_number",  # Order messages by turn number
+    )
+
+    # Timestamps for tracking game creation and updates
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, default=datetime.datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+        nullable=False,
+    )
+
+    # --- Helper property for accessing current_room as dict ---
     @property
     def current_room(self) -> Optional[Dict[str, Any]]:
         """Load current room from JSON."""
         if self.current_room_json:
-            import json
-
             try:
                 return json.loads(self.current_room_json)
             except json.JSONDecodeError:
-                return None
+                # Log this error
+                current_app.logger.error(
+                    f"Failed to decode current_room_json for game {self.id}"
+                )
+                return None  # Or return a default error room structure
         return None
 
     @current_room.setter
     def current_room(self, value: Optional[Dict[str, Any]]):
         """Save current room as JSON."""
-        import json
-
         if value is None:
             self.current_room_json = None
         else:
-            self.current_room_json = json.dumps(value)
-
-    @property
-    def chat_history(
-        self,
-    ) -> List[Dict[str, str]]:  # Use Dict for simplicity or ChatMessage
-        """Load chat history from JSON."""
-        if self.chat_history_json:
             try:
-                history = json.loads(self.chat_history_json)
-                # Basic validation: ensure it's a list of dicts with 'role' and 'content'
-                if isinstance(history, list) and all(
-                    isinstance(msg, dict) and "role" in msg and "content" in msg
-                    for msg in history
-                ):
-                    return history
-                else:
-                    # Log error or return default if structure is invalid
-                    current_app.logger.warning(
-                        f"Invalid chat history JSON structure for game {self.id}. Resetting."
-                    )
-                    return []
-            except json.JSONDecodeError:
+                self.current_room_json = json.dumps(value)
+            except TypeError as e:
+                # Log this error
                 current_app.logger.error(
-                    f"Failed to decode chat history JSON for game {self.id}. Resetting."
+                    f"Failed to serialize current_room to JSON for game {self.id}: {e}"
                 )
-                return []
-        return []  # Return empty list if no history stored yet
+                self.current_room_json = None  # Avoid saving invalid data
 
-    @chat_history.setter
-    def chat_history(self, value: List[Dict[str, str]]):
-        """Save chat history as JSON."""
-        if value is None:
-            self.chat_history_json = None
-        else:
-            # Optional: Add validation before saving if needed
-            self.chat_history_json = json.dumps(value)
+    def get_chat_history_for_ai(self) -> List[Dict[str, str]]:
+        """Formats the stored chat messages for the AI service."""
+        history = []
+        for msg in self.chat_messages:
+            content = msg.content
+            history.append({"role": msg.role, "content": content})
+        return history
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert GameState model to dictionary."""
-        return {
-            "id": self.id,
-            "player": self.player.to_dict() if self.player else None,
-            "difficulty": self.difficulty,
-            "current_room": self.current_room,
-            "rooms_cleared": self.rooms_cleared,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        """Create GameState instance from dictionary (useful for updates)."""
-        state = cls(
-            difficulty=data.get("difficulty", "medium"),
-            rooms_cleared=data.get("rooms_cleared", 0),
+    def add_chat_message(self, role: str, content: str, turn_number: int):
+        """Adds a new message to the chat history."""
+        new_message = ChatMessage(
+            game_state_id=self.id,
+            role=role,
+            content=content,
+            turn_number=turn_number,
         )
-        state.current_room = data.get("current_room")  # Use setter
-        if "player" in data:
-            # This assumes player exists or needs creation based on context
-            # More complex logic might be needed for finding/updating existing players
-            state.player = Player.from_dict(data["player"])
-        return state
+        # Appending to the relationship list automatically handles the session add
+        self.chat_messages.append(new_message)
+
+    def __repr__(self):
+        player_name = self.player.name if self.player else "No Player"
+        return f"<GameState id={self.id} player={player_name} difficulty={self.difficulty}>"
