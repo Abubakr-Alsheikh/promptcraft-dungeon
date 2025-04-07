@@ -1,18 +1,29 @@
-# backend/app/services/game_service.py
-import json
 import logging
 from typing import List, Dict, Any, Optional, Tuple
+from sqlalchemy.orm import selectinload
+from sqlalchemy import select
 from ..extensions import db
-from ..models.game import GameState, Player
-from ..models.ai_responses import AIResponse, AIEvent, AIEventEffect
+from ..models.game import GameState, Player, Item, PlayerInventoryItem
+from ..models.ai_responses import AIResponse
 from ..prompts.game_prompts import BASE_SYSTEM_PROMPT, INITIAL_ROOM_PROMPT_USER
-from ..schemas.game import PlayerStatsSchema, ItemSchema  # Import schemas
-from ..services.ai_service import AIService
+from ..schemas.game import PlayerStatsSchema, ItemSchema  # Pydantic schemas for API
+from ..services.ai_service import AIService, AIResponseError
 
 logger = logging.getLogger(__name__)
 
 
+class GameServiceError(Exception):
+    """Custom exception for Game Service errors."""
+
+    pass
+
+
 class GameService:
+    """
+    Handles the core game logic, state management, and interactions between
+    the database, AI service, and API routes.
+    """
+
     def __init__(self, ai_service: AIService):
         self.ai_service = ai_service
 
@@ -20,424 +31,502 @@ class GameService:
         self, player_name: str, difficulty: str
     ) -> Tuple[Optional[GameState], Optional[str]]:
         """
-        Initializes a new game state, generates the first room via AI, saves state and initial history.
+        Initializes a new game: creates Player & GameState, gets the first
+        room description from AI, saves initial state and chat history.
+
+        Returns:
+            Tuple (GameState object, None) on success.
+            Tuple (None, error_message) on failure.
         """
-        logger.info(f"Starting new game for {player_name}, difficulty {difficulty}")
+        logger.info(
+            f"Attempting to start new game for player '{player_name}', difficulty '{difficulty}'"
+        )
         try:
-            player = Player(
-                name=player_name,
-                health=100,
-                max_health=100,
-                inventory=[],
-                level=1,
-                gold=10,
-                experience=0,  # Ensure XP starts at 0
-            )
-            game_state = GameState(
-                player=player, difficulty=difficulty, rooms_cleared=0
+            # 1. Create Player and GameState objects (without saving yet)
+            player = Player(name=player_name, gold=10)  # Defaults set in model
+            game_state = GameState(player=player, difficulty=difficulty)
+            # Add to session early so relationships can work if needed immediately
+            db.session.add(game_state)
+            # Flush to get IDs assigned, but don't commit yet
+            db.session.flush()
+            logger.debug(
+                f"Created initial Player ID: {player.id}, GameState ID: {game_state.id}"
             )
 
-            # Prepare context *just* for initial room generation
+            # 2. Prepare context for initial AI room generation
             context = self._build_ai_context(game_state, command="<INITIAL_GENERATION>")
+            initial_user_prompt = INITIAL_ROOM_PROMPT_USER.format(
+                player_name=player.name, difficulty=game_state.difficulty
+            )
 
-            # Generate the initial room description using the specific user prompt
-            initial_room_ai_response: Optional[AIResponse] = (
+            # 3. Call AI Service to generate the first scene
+            initial_ai_response, ai_error = (
                 self.ai_service.generate_structured_response(
                     system_prompt_template=BASE_SYSTEM_PROMPT,
                     history=[],  # No history for the very first call
-                    user_command=INITIAL_ROOM_PROMPT_USER.format(  # Format the specific user prompt part
-                        player_name=player_name, difficulty=difficulty
-                    ),
+                    user_command=initial_user_prompt,
                     context=context,
                 )
             )
 
-            if (
-                not initial_room_ai_response
-                or not initial_room_ai_response.action_result_description
-            ):
-                logger.error("AI failed to generate initial room description.")
-                return None, "Failed to generate the starting area with the Narrator."
+            if ai_error or not initial_ai_response:
+                error_msg = (
+                    f"AI failed to generate initial room: {ai_error or 'No response'}"
+                )
+                logger.error(error_msg)
+                # Rollback changes if AI fails startup
+                db.session.rollback()
+                return None, error_msg
 
-            # Store initial room description (comes from action_result_description for the first call)
-            initial_description = initial_room_ai_response.action_result_description
-            initial_title = "The Beginning"  # Default title for the first room
-            initial_exits = []  # AI *could* implicitly suggest exits in the description
+            # Ensure essential part of response is present
+            if not initial_ai_response.action_result_description:
+                error_msg = "AI response for initial room lacked essential 'action_result_description'."
+                logger.error(error_msg)
+                db.session.rollback()
+                return None, error_msg
 
-            # Store the first room state
-            game_state.current_room_json = json.dumps(
-                {
-                    "title": initial_title,
-                    "description": initial_description,
-                    "exits": initial_exits,
-                    # Initial events might be specified by the AI, if any
-                    "events": [
-                        event.model_dump()
-                        for event in initial_room_ai_response.triggered_events
-                    ],
-                }
+            logger.debug("AI generated initial room successfully.")
+
+            # 4. Set the initial room state based on AI response
+            initial_description = initial_ai_response.action_result_description
+            initial_title = initial_ai_response.new_room_title or "The Beginning"
+            initial_exits = initial_ai_response.new_room_exits or []
+            # Use the setter for current_room
+            game_state.current_room = {
+                "title": initial_title,
+                "description": initial_description,
+                "exits": initial_exits,
+                "events": [
+                    evt.model_dump() for evt in initial_ai_response.triggered_events
+                ],
+            }
+            logger.debug(f"Initial room set: '{initial_title}'")
+
+            # 5. Initialize Chat History with the AI's first message
+            # Store the structured AI response as a JSON string in the content
+            initial_ai_content_json = initial_ai_response.model_dump_json()
+            game_state.add_chat_message(
+                role="assistant",
+                content=initial_ai_content_json,
+                turn_number=0,  # First turn (AI introduces scene)
             )
-            logger.debug(f"Initial room generated: {initial_description[:100]}...")
+            logger.debug("Initial chat history added.")
 
-            # --- Initialize Chat History ---
-            # The AI's first output acts as the initial 'assistant' message providing the scene.
-            initial_history = [
-                # System prompt is added dynamically by AI Service now
-                {
-                    "role": "assistant",
-                    "content": initial_room_ai_response.model_dump_json(),  # Store the full initial response
-                }
-            ]
-            game_state.chat_history = initial_history  # Use the setter
+            # 6. Apply any effects from initial AI response (e.g., maybe AI gives starting item)
+            # This is unlikely for initial prompt but possible
+            self._apply_ai_effects(player, initial_ai_response)
 
-            db.session.add(game_state)
+            # 7. Commit the entire transaction
             db.session.commit()
             logger.info(
-                f"New game state (ID: {game_state.id}) created and saved with initial history."
+                f"New game (ID: {game_state.id}) started successfully for player '{player.name}'."
             )
 
             return game_state, None
 
         except Exception as e:
             db.session.rollback()
-            logger.exception(f"Error starting new game: {e}")
-            return None, f"An unexpected server error occurred: {e}"
+            logger.exception(f"Unexpected error starting new game: {e}")
+            return (
+                None,
+                f"An unexpected server error occurred during game creation: {e}",
+            )
 
     def handle_player_command(
         self, game_state_id: int, command: str
     ) -> Tuple[Optional[GameState], Optional[AIResponse], Optional[str]]:
         """
-        Loads game state + history, sends command+context+history to AI,
-        applies results, saves state + history, and handles room updates correctly.
+        Processes a player command: loads state, calls AI, applies results, saves state.
+
+        Returns:
+            Tuple (updated GameState, AIResponse, None) on success.
+            Tuple (original GameState | None, None, error_message) on failure.
         """
-        logger.info(f"Handling command '{command}' for game state ID {game_state_id}")
-        game_state: Optional[GameState] = None  # Initialize game_state
+        logger.info(f"Handling command '{command}' for game ID {game_state_id}")
+        game_state: Optional[GameState] = None
         try:
-            game_state = db.session.get(GameState, game_state_id)
+            # 1. Load Game State and Player (with necessary relationships)
+            # Use joinedload/selectinload for efficiency if accessing relationships often
+            game_state = db.session.get(
+                GameState,
+                game_state_id,
+                options=[
+                    selectinload(GameState.player)
+                    .selectinload(Player.inventory_items)
+                    .joinedload(PlayerInventoryItem.item),
+                    selectinload(GameState.chat_messages),  # Load history efficiently
+                ],
+            )
+
             if not game_state or not game_state.player:
                 logger.error(f"Game state {game_state_id} not found or has no player.")
                 return None, None, "Game session not found. Please start a new game."
 
-            # Load existing chat history
-            history = game_state.chat_history  # Use the getter
-            logger.debug(
-                f"Loaded history for game {game_state_id}, length: {len(history)}"
-            )
+            player = game_state.player
+            logger.debug(f"Loaded game state for player '{player.name}'.")
 
-            # Prepare Context for AI (used for formatting system prompt)
+            # 2. Get chat history formatted for AI
+            history = game_state.get_chat_history_for_ai()
+            current_turn = len(history)  # Next turn number (0-indexed)
+            logger.debug(f"History length for AI: {len(history)}")
+
+            # 3. Prepare Context & Call AI Service
             context = self._build_ai_context(game_state, command)
-            # logger.debug(f"AI Context: {context}") # Can be very verbose
-
-            # Get AI Response
-            ai_response: Optional[AIResponse] = (
-                self.ai_service.generate_structured_response(
-                    system_prompt_template=BASE_SYSTEM_PROMPT,
-                    history=history,
-                    user_command=command,
-                    context=context,
-                )
+            ai_response, ai_error = self.ai_service.generate_structured_response(
+                system_prompt_template=BASE_SYSTEM_PROMPT,
+                history=history,
+                user_command=command,
+                context=context,
             )
 
-            if not ai_response:
-                logger.error(f"AI failed to generate response for command: {command}")
-                # Don't save history if AI failed, return current state as is.
-                return (
-                    game_state,  # Return the state *before* the failed command
-                    None,
-                    "The Narrator seems lost in thought... (AI failed to respond)",
+            # 4. Handle AI Failure
+            if ai_error or not ai_response:
+                error_msg = f"AI interaction failed: {ai_error or 'No response'}"
+                logger.error(
+                    f"{error_msg} for game {game_state_id}, command '{command}'"
                 )
+                # Do NOT commit any changes. Return the state *before* the failed command attempt.
+                # Do NOT add the failed command/response to history.
+                return game_state, None, error_msg  # Return original state
 
+            logger.debug(f"AI Response received for command '{command}'.")
+            # logger.debug(f"AI Response data: {ai_response.model_dump_json(indent=2)}")
+
+            # --- If AI Success, proceed with updates ---
+
+            # 5. Add User Command and AI Response to Chat History
+            game_state.add_chat_message(
+                role="user", content=command, turn_number=current_turn
+            )
+            game_state.add_chat_message(
+                role="assistant",
+                content=ai_response.model_dump_json(),
+                turn_number=current_turn + 1,
+            )
             logger.debug(
-                f"AI Response received: {ai_response.model_dump_json(indent=2)}"
+                f"Added user command and AI response to history for turn {current_turn}."
             )
 
-            # --- Update History BEFORE applying effects ---
-            # Store the user command and the successful AI response JSON
-            history.append({"role": "user", "content": command})
-            history.append(
-                {"role": "assistant", "content": ai_response.model_dump_json()}
-            )
-            game_state.chat_history = history  # Use the setter to save updated history
+            # 6. Apply AI Effects to Player State
+            self._apply_ai_effects(player, ai_response)
+            logger.debug("Applied AI effects to player state.")
 
-            # --- Apply AI-dictated changes to Game State ---
-            self._apply_ai_effects(
-                game_state.player, ai_response
-            )  # Apply effects first
-
-            # --- Update Room State (Crucial Change Here) ---
+            # 7. Update Room State if Necessary
             current_room_data = game_state.current_room or {}  # Get mutable dict
-
-            # Check if the AI response indicates a move to a NEW room
-            if ai_response.room_description:  # Check the RENAMED field
+            if ai_response.room_description:  # AI indicates a move to a NEW room
                 logger.info(
-                    f"Player is moving to a new room/area in game {game_state_id}"
+                    f"Player moving to new area in game {game_state_id}. AI Title: '{ai_response.new_room_title}'"
                 )
-                current_room_data["description"] = (
-                    ai_response.room_description
-                )  # Update with the new description
-                current_room_data["title"] = (
-                    ai_response.new_room_title or "Unknown Area"
-                )  # Use AI suggested title or default
-                current_room_data["exits"] = (
-                    ai_response.new_room_exits or []
-                )  # Use AI suggested exits or reset
-                # Events triggered by the *action* that caused the move are already captured in ai_response.triggered_events
-                # We might want to clear room-specific events upon moving, or let the AI define new ones for the room
-                current_room_data["events"] = (
-                    []
-                )  # Clear old room-specific events? Or keep action-related ones? Decision needed. Let's clear for now.
-                # Alternatively, filter ai_response.triggered_events for only those relevant *after* the move? Complex.
+                new_title = ai_response.new_room_title or "Unknown Area"
+                game_state.current_room = {
+                    "title": new_title,
+                    "description": ai_response.room_description,
+                    "exits": ai_response.new_room_exits or [],
+                    "events": [],  # Reset room-specific events upon entering a new one? Or use triggered_events? Simple reset for now.
+                }
                 game_state.rooms_cleared += (
-                    1  # Increment if moving counts as clearing previous area
+                    1  # Increment counter for moving to new area
+                )
+                logger.debug(
+                    f"Updated current_room to '{new_title}'. Rooms cleared: {game_state.rooms_cleared}"
                 )
             else:
-                # Player remains in the same room. DO NOT overwrite the main description.
-                # The 'action_result_description' is for immediate feedback, not the persistent room state.
-                # We *could* update room 'events' based on the action's triggered events, if needed.
-                # For example, if an action revealed a hidden switch in the current room.
+                # Player remains in the same room. Only the AI's 'action_result_description' provides feedback.
+                # The persistent 'current_room.description' is NOT updated here.
+                # We *could* potentially update the room's 'events' list based on ai_response.triggered_events
+                # if an action modified the current room (e.g., revealed something). Requires careful design.
                 logger.debug(
                     f"Player remains in room '{current_room_data.get('title', 'current')}'"
                 )
-                # Decide if action-triggered events should modify the *room's* persistent event list
-                # For now, let's assume room events are relatively static unless AI explicitly modifies them via a dedicated event type.
-                # current_room_data["events"] = [event.model_dump() for event in ai_response.triggered_events] # This would make room events reflect the last action heavily. Maybe not desired.
+                # No change needed to game_state.current_room property itself if description isn't changing.
 
-            game_state.current_room = current_room_data  # Assign back to trigger setter
-
-            # Save Updated State (includes updated history, player stats, room state)
+            # 8. Commit all changes (history, player state, room state)
             db.session.commit()
             logger.info(
-                f"Game state {game_state_id} updated and saved after command '{command}'. History length: {len(history)}"
+                f"Game state {game_state_id} updated successfully after command '{command}'."
             )
 
-            # Return the updated state and the full AI response
+            # 9. Return updated state and the successful AI response
             return game_state, ai_response, None
 
         except Exception as e:
-            db.session.rollback()
+            db.session.rollback()  # Rollback on any unexpected error during processing
             logger.exception(
-                f"Error handling command '{command}' for game state {game_state_id}: {e}"
+                f"Unexpected error handling command '{command}' for game {game_state_id}: {e}"
             )
-            # If an exception occurred after loading state but before finishing,
-            # it's safer to return None than potentially inconsistent state.
-            # If game_state was loaded, we *could* try returning it, but risk inconsistency.
-            # Let's return None for state on major errors.
+            # Return None for state to indicate a critical failure. The route handler should signal 500.
             return None, None, f"An unexpected server error occurred: {e}"
 
     def _build_ai_context(self, game_state: GameState, command: str) -> Dict[str, Any]:
         """Helper to create the context dictionary for AI system prompts."""
         player = game_state.player
-        room = game_state.current_room or {
-            "description": "An empty void",
-            "exits": [],
-            "title": "Nowhere",
-        }
+        room = game_state.current_room or {}  # Use property getter
 
+        # Fetch inventory details using the relationship
         inventory_list = []
-        for item_dict in player.inventory:
-            name = item_dict.get("name", "Unknown Item")
-            qty = item_dict.get("quantity", 1)
-            inventory_list.append(f"{name} ({qty})")
+        # Ensure items are loaded - they should be if using eager loading in handle_player_command
+        if player and player.inventory_items:
+            # Access related item details via the relationship
+            for inv_item in player.inventory_items:
+                if inv_item.item:  # Check if item relationship loaded
+                    name = inv_item.item.name
+                    qty = inv_item.quantity
+                    inventory_list.append(f"{name} (x{qty})")
+                else:
+                    logger.warning(
+                        f"Inventory item entry missing related Item data for player {player.id}"
+                    )
         inventory_str = ", ".join(inventory_list) if inventory_list else "Empty"
 
         context = {
             "difficulty": game_state.difficulty,
-            "player_name": player.name,
-            "health": player.health,
-            "max_health": player.max_health,
-            "level": player.level,
+            "player_name": player.name if player else "Unknown",
+            "health": player.health if player else 0,
+            "max_health": player.max_health if player else 0,
+            "level": player.level if player else 0,
+            "gold": player.gold if player else 0,
             "inventory": inventory_str,
-            # Provide the persistent room description here
+            "current_room_title": room.get("title", "Unknown Location"),
             "current_room_description": room.get(
                 "description", "You are in a featureless location."
             ),
-            # Provide known exits
             "current_room_exits": ", ".join(room.get("exits", [])),
-            "player_command": command,  # The *current* command being processed
+            "player_command": command,
         }
         return context
 
     def _apply_ai_effects(self, player: Player, ai_response: AIResponse):
-        """Applies effects from AI events to the player state."""
+        """
+        Applies effects from AIResponse triggered_events to the player state.
+        Modifies the player object directly (assumes active db session).
+        """
         if not player:
             logger.warning("Attempted to apply effects to a null player.")
             return
 
-        # Use a temporary variable to hold inventory for modification clarity
-        current_inventory = list(player.inventory)  # Ensure it's a mutable list copy
+        logger.debug(f"Applying effects for player {player.id}...")
+        items_cache = (
+            {}
+        )  # Simple cache to avoid repeated DB lookups for the same item key in one response
 
         for event in ai_response.triggered_events:
-            if event.effects:
-                effects = event.effects
-                logger.debug(
-                    f"Applying effects from event type '{event.type}': {effects.model_dump()}"
-                )
+            if not event.effects:
+                continue  # Skip events with no effects block
 
-                # Health changes
-                if effects.health is not None:  # Check for None explicitly
-                    try:
-                        delta = int(effects.health)
-                        new_health = max(
-                            0, min(player.max_health, player.health + delta)
-                        )
-                        if new_health != player.health:
-                            logger.info(
-                                f"Player health changed by {delta} from {player.health} to {new_health}"
-                            )
-                            player.health = new_health
-                        else:
-                            logger.debug(
-                                f"Health change {delta} resulted in no actual change (min/max boundary)."
-                            )
-                    except (ValueError, TypeError):
-                        logger.warning(f"Invalid health effect value: {effects.health}")
-
-                # Gold changes
-                if effects.gold is not None:
-                    try:
-                        delta = int(effects.gold)
-                        new_gold = max(0, player.gold + delta)
-                        if new_gold != player.gold:
-                            logger.info(
-                                f"Player gold changed by {delta} from {player.gold} to {new_gold}"
-                            )
-                            player.gold = new_gold
-                        else:
-                            logger.debug(
-                                f"Gold change {delta} resulted in no actual change (min 0)."
-                            )
-                    except (ValueError, TypeError):
-                        logger.warning(f"Invalid gold effect value: {effects.gold}")
-
-                # XP changes
-                if effects.xp is not None:
-                    try:
-                        delta = int(effects.xp)
-                        if delta > 0:  # Typically only gain XP
-                            new_xp = player.experience + delta
-                            logger.info(
-                                f"Player XP changed by {delta} from {player.experience} to {new_xp}"
-                            )
-                            player.experience = new_xp
-                            # TODO: Add level up check logic here
-                            # if player.experience >= calculate_xp_for_next_level(player.level):
-                            #    level_up(player)
-                        elif delta < 0:
-                            logger.warning(
-                                f"Received negative XP change ({delta}), ignoring."
-                            )
-                    except (ValueError, TypeError):
-                        logger.warning(f"Invalid XP effect value: {effects.xp}")
-
-                # Inventory changes - Removals first
-                if effects.inventory_remove:
-                    items_to_remove_lower = {
-                        item_name.lower().strip()
-                        for item_name in effects.inventory_remove
-                        if item_name  # Ignore empty strings
-                    }
-                    if not items_to_remove_lower:
-                        continue  # Skip if list was empty/invalid
-
-                    next_inventory = []
-                    items_actually_removed = set()
-                    for item_dict in current_inventory:
-                        item_name = item_dict.get("name", "").lower().strip()
-                        if item_name in items_to_remove_lower:
-                            # Simple removal - assumes quantity 1 or remove whole stack
-                            # TODO: Implement quantity-based removal if needed
-                            logger.info(
-                                f"Removing item '{item_dict.get('name', item_name)}' from inventory."
-                            )
-                            items_to_remove_lower.remove(
-                                item_name
-                            )  # Remove from set to handle only first match if names collide (shouldn't happen with unique IDs ideally)
-                            items_actually_removed.add(item_dict.get("name", item_name))
-                            # Don't add this item back to next_inventory
-                            continue
-                        next_inventory.append(item_dict)
-                    current_inventory = (
-                        next_inventory  # Update the list being worked on
-                    )
-
-                    # Log if some requested items weren't found
-                    for requested_remove in effects.inventory_remove:
-                        if requested_remove not in items_actually_removed:
-                            logger.warning(
-                                f"Attempted to remove item '{requested_remove}', but it was not found in inventory."
-                            )
-
-                # Inventory changes - Additions
-                if effects.inventory_add:
-                    for item_name_to_add in effects.inventory_add:
-                        if not item_name_to_add or not item_name_to_add.strip():
-                            continue  # Skip empty names
-
-                        item_name_to_add = item_name_to_add.strip()  # Clean name
-                        logger.info(f"Adding item '{item_name_to_add}' to inventory.")
-
-                        # Check if item exists to increment quantity (case-insensitive check)
-                        found = False
-                        for item_dict in current_inventory:
-                            if (
-                                item_dict.get("name", "").strip().lower()
-                                == item_name_to_add.lower()
-                            ):
-                                item_dict["quantity"] = item_dict.get("quantity", 0) + 1
-                                logger.debug(
-                                    f"Incremented quantity for '{item_name_to_add}' to {item_dict['quantity']}"
-                                )
-                                found = True
-                                break
-                        if not found:
-                            # Add new item - need default properties
-                            # This is a simplification. Ideally, have an item template/database lookup
-                            # Use Pydantic schema to create the dict, ensuring structure
-                            new_item_schema = ItemSchema(
-                                # Generate a more robust unique ID if possible, maybe using uuid
-                                id=f"item_{item_name_to_add.replace(' ','_').lower()}_{player.id}_{len(current_inventory)}",
-                                name=item_name_to_add,
-                                description="Acquired recently.",  # AI could potentially provide description
-                                quantity=1,
-                                rarity="common",  # Default rarity, AI could specify
-                                # Default other fields from ItemSchema
-                                icon=None,
-                                canUse=False,  # Defaults, AI could specify based on item type
-                                canEquip=False,
-                                canDrop=True,
-                            )
-                            current_inventory.append(
-                                new_item_schema.model_dump()
-                            )  # Add as dict
-                            logger.debug(
-                                f"Added new item entry: {new_item_schema.model_dump()}"
-                            )
-
-                # TODO: Apply status effects (add/remove) to player state if needed
-                # Requires player model to have a status effects field (e.g., JSON list)
-                # if effects.status_effect_add: player.add_status_effects(effects.status_effect_add)
-                # if effects.status_effect_remove: player.remove_status_effects(effects.status_effect_remove)
-
-        # Assign the modified list back to the player property to trigger the setter
-        player.inventory = current_inventory
-        logger.debug("Finished applying AI effects.")
-
-    def _map_player_to_schema(self, player: Player) -> PlayerStatsSchema:
-        """Maps the backend Player model to the PlayerStatsSchema for frontend."""
-        if not player:  # Defensive check
-            # Return a default/empty schema or raise error?
-            logger.error("Cannot map null player to schema.")
-            # Returning default schema to avoid breaking API contract, but indicates an issue.
-            return PlayerStatsSchema(
-                currentHp=0, maxHp=0, gold=0, xp=0, maxXp=100, level=1
+            effects = event.effects
+            logger.debug(
+                f"Processing effects from event type '{event.type}': {effects.model_dump()}"
             )
 
-        # Example XP calculation for next level (adjust as needed)
-        max_xp = 100 * (2 ** (player.level - 1))  # Exponential growth example
+            # --- Stat Changes ---
+            try:
+                if effects.health is not None:
+                    delta = int(effects.health)
+                    player.health = max(
+                        0, min(player.max_health, player.health + delta)
+                    )
+                    logger.debug(
+                        f"Player {player.id} health changed by {delta} to {player.health}"
+                    )
+                if effects.gold is not None:
+                    delta = int(effects.gold)
+                    player.gold = max(0, player.gold + delta)
+                    logger.debug(
+                        f"Player {player.id} gold changed by {delta} to {player.gold}"
+                    )
+                if effects.xp is not None:
+                    delta = int(effects.xp)
+                    if delta > 0:
+                        player.experience += delta
+                        logger.debug(
+                            f"Player {player.id} XP changed by {delta} to {player.experience}"
+                        )
+                        # TODO: Implement level up check
+                        # self._check_level_up(player)
+                    elif delta < 0:
+                        logger.warning(
+                            f"Ignoring negative XP change ({delta}) for player {player.id}"
+                        )
+            except (ValueError, TypeError) as e:
+                logger.warning(
+                    f"Invalid numeric value in effects for player {player.id}: {e}. Effect: {effects.model_dump()}"
+                )
 
-        # Use Pydantic model for validation and structure
+            # --- Inventory Removals ---
+            if effects.inventory_remove:
+                items_removed_count = 0
+                for item_name_to_remove in effects.inventory_remove:
+                    item_name_lower = item_name_to_remove.lower().strip()
+                    if not item_name_lower:
+                        continue
+
+                    # Find the inventory item entry matching the name (case-insensitive)
+                    found_entry: Optional[PlayerInventoryItem] = None
+                    for inv_item in player.inventory_items:
+                        if (
+                            inv_item.item
+                            and inv_item.item.name.lower() == item_name_lower
+                        ):
+                            found_entry = inv_item
+                            break
+
+                    if found_entry:
+                        # Simple removal: decrease quantity or delete entry
+                        if found_entry.quantity > 1:
+                            found_entry.quantity -= 1
+                            logger.debug(
+                                f"Decremented quantity for item '{found_entry.item.name}' to {found_entry.quantity} for player {player.id}"
+                            )
+                        else:
+                            # Remove the association object from the session
+                            db.session.delete(found_entry)
+                            # Important: Also remove from the player's loaded collection to reflect change immediately
+                            # This requires the relationship to be loaded and mutable.
+                            # player.inventory_items.remove(found_entry) # Might cause issues depending on cascade/session state
+                            logger.debug(
+                                f"Removed item entry '{found_entry.item.name}' for player {player.id}"
+                            )
+                        items_removed_count += 1
+                        # Break if only removing one instance, continue if removing all matching items by name is intended
+                    else:
+                        logger.warning(
+                            f"Player {player.id} tried to remove item '{item_name_to_remove}', but it wasn't found in inventory."
+                        )
+                if items_removed_count > 0:
+                    db.session.flush()  # Flush removals before additions if needed
+
+            # --- Inventory Additions ---
+            if effects.inventory_add:
+                items_added_count = 0
+                for item_name_to_add in effects.inventory_add:
+                    item_name_clean = item_name_to_add.strip()
+                    if not item_name_clean:
+                        continue
+                    item_key = item_name_clean.lower().replace(
+                        " ", "_"
+                    )  # Simple key generation, **fragile**
+
+                    # TODO: Robust Item Handling - This assumes AI provides names that map directly
+                    # to existing Item.name or Item.item_key. Ideally, AI should provide a predefined
+                    # item_key, or we need a lookup system (e.g., fuzzy matching name -> item_key).
+
+                    # 1. Find the base Item definition
+                    item_def: Optional[Item] = items_cache.get(item_key)
+                    if not item_def:
+                        # Try finding by key, then maybe by name (case-insensitive)
+                        stmt = select(Item).where(
+                            (Item.item_key == item_key)
+                            | (Item.name.ilike(item_name_clean))
+                        )
+                        item_def = db.session.execute(stmt).scalar_one_or_none()
+                        if item_def:
+                            items_cache[item_key] = item_def  # Cache it
+
+                    if not item_def:
+                        # Option 1: Fail - Item must exist in DB
+                        logger.warning(
+                            f"Item definition not found for '{item_name_to_add}' (key: '{item_key}'). Cannot add to inventory for player {player.id}."
+                        )
+                        # Option 2: Create a basic item on the fly (less controlled)
+                        # logger.info(f"Creating basic item definition for '{item_name_to_add}' on the fly.")
+                        # item_def = Item(item_key=item_key, name=item_name_to_add, description="Newly discovered.")
+                        # db.session.add(item_def)
+                        # db.session.flush() # Get ID
+                        # items_cache[item_key] = item_def
+                        continue  # Skip adding if definition not found (Option 1)
+
+                    # 2. Check if player already has this item type
+                    existing_entry: Optional[PlayerInventoryItem] = None
+                    for inv_item in player.inventory_items:
+                        if inv_item.item_id == item_def.id:
+                            existing_entry = inv_item
+                            break
+
+                    # 3. Add or update inventory entry
+                    if existing_entry:
+                        existing_entry.quantity += 1
+                        logger.debug(
+                            f"Incremented quantity for item '{item_def.name}' to {existing_entry.quantity} for player {player.id}"
+                        )
+                    else:
+                        new_entry = PlayerInventoryItem(
+                            player_id=player.id, item_id=item_def.id, quantity=1
+                        )
+                        db.session.add(new_entry)  # Add the new association
+                        # Also add to loaded relationship if needed for immediate access before commit/refresh
+                        player.inventory_items.append(new_entry)
+                        logger.debug(
+                            f"Added new item '{item_def.name}' (qty 1) for player {player.id}"
+                        )
+                    items_added_count += 1
+                if items_added_count > 0:
+                    db.session.flush()  # Flush additions
+
+            # --- Status Effects ---
+            # TODO: Implement status effect handling if Player model has status field
+            # if effects.status_effect_add: logger.info(f"Adding status effects: {effects.status_effect_add}") # player.add_status(effects.status_effect_add)
+            # if effects.status_effect_remove: logger.info(f"Removing status effects: {effects.status_effect_remove}") # player.remove_status(effects.status_effect_remove)
+
+        logger.debug(f"Finished applying effects for player {player.id}.")
+        # No explicit commit here, handled by caller (handle_player_command)
+
+    # --- Mapping Functions to Frontend Schemas ---
+
+    def get_game_state_for_frontend(
+        self, game_state: GameState
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Maps the backend GameState to the dictionary structure expected by frontend API responses.
+        Uses Pydantic schemas for player stats and inventory items.
+
+        Returns:
+            Dictionary matching frontend expectations, or None if mapping fails.
+        """
+        if not game_state or not game_state.player:
+            logger.error("Cannot get frontend state for null GameState or Player.")
+            return None
+
         try:
-            player_schema = PlayerStatsSchema(
+            player_schema = self._map_player_to_schema(game_state.player)
+            # Ensure inventory items and their related item details are loaded
+            inventory_schema_list = self._map_inventory_to_schema(
+                game_state.player.inventory_items
+            )
+
+            current_room = game_state.current_room  # Use property
+            room_description = (
+                current_room.get("description", "Error: Room data missing.")
+                if current_room
+                else "You are in an undefined space."
+            )
+            room_title = (
+                current_room.get("title", "Unknown Location")
+                if current_room
+                else "Nowhere"
+            )
+
+            return {
+                "playerStats": player_schema.model_dump(),
+                "inventory": [item.model_dump() for item in inventory_schema_list],
+                "description": room_description,
+                "roomTitle": room_title,
+                # Add other top-level state info if needed by frontend
+                "difficulty": game_state.difficulty,
+                "roomsCleared": game_state.rooms_cleared,
+            }
+        except Exception as e:
+            logger.exception(
+                f"Error mapping game state {game_state.id} to frontend structure: {e}"
+            )
+            return None
+
+    def _map_player_to_schema(self, player: Player) -> PlayerStatsSchema:
+        """Maps the Player model to the PlayerStatsSchema."""
+        # Example XP calculation (adjust as needed per game design)
+        max_xp = 100 * (2 ** (player.level - 1)) if player.level > 0 else 100
+
+        try:
+            return PlayerStatsSchema(
                 currentHp=player.health,
                 maxHp=player.max_health,
                 gold=player.gold,
@@ -445,85 +534,57 @@ class GameService:
                 maxXp=max_xp,
                 level=player.level,
             )
-            return player_schema
-        except Exception as e:  # Catch potential validation errors during creation
+        except Exception as e:
             logger.error(
-                f"Error mapping player data to PlayerStatsSchema: {e}. Data: {player.to_dict()}"
+                f"Error mapping player {player.id} data to PlayerStatsSchema: {e}",
+                exc_info=True,
             )
-            # Return default again or re-raise? Default prevents crash.
+            # Return a default schema on error to prevent crashing caller
             return PlayerStatsSchema(
-                currentHp=0, maxHp=0, gold=0, xp=0, maxXp=100, level=1
+                currentHp=0, maxHp=100, gold=0, xp=0, maxXp=100, level=1
             )
 
     def _map_inventory_to_schema(
-        self, inventory_list: List[Dict[str, Any]]
+        self, inventory_items: List[PlayerInventoryItem]
     ) -> List[ItemSchema]:
-        """Maps the backend inventory (list of dicts) to a list of ItemSchema for frontend."""
+        """Maps PlayerInventoryItem relationship data to a list of ItemSchema."""
         items_schema_list = []
-        if not isinstance(inventory_list, list):  # Basic type check
-            logger.error(
-                f"Invalid inventory data type for mapping: {type(inventory_list)}"
-            )
+        if not inventory_items:
             return []
 
-        for item_data in inventory_list:
-            if not isinstance(item_data, dict):  # Ensure item is a dict
-                logger.warning(f"Skipping invalid item data in inventory: {item_data}")
+        for inv_item in inventory_items:
+            item_model = inv_item.item  # Access the related Item model
+            if not item_model:
+                logger.warning(
+                    f"PlayerInventoryItem (Player: {inv_item.player_id}, Qty: {inv_item.quantity}) is missing related Item data."
+                )
                 continue
+
             try:
-                # Use ItemSchema.model_validate for robust validation and default handling
-                item_schema = ItemSchema.model_validate(
-                    {
-                        # Provide defaults explicitly if keys might be missing entirely
-                        "id": item_data.get(
-                            "id",
-                            f"unknown_{item_data.get('name','item')}_{len(items_schema_list)}",
-                        ),  # More robust default ID
-                        "name": item_data.get("name", "Unknown Item"),
-                        "description": item_data.get("description", ""),
-                        "quantity": item_data.get("quantity", 1),
-                        "rarity": item_data.get("rarity", "common"),
-                        "icon": item_data.get("icon"),
-                        # Handle potential key variations ('canUse' vs 'can_use') gracefully
-                        "canUse": item_data.get(
-                            "canUse", item_data.get("can_use", False)
-                        ),
-                        "canEquip": item_data.get(
-                            "canEquip", item_data.get("can_equip", False)
-                        ),
-                        "canDrop": item_data.get(
-                            "canDrop", item_data.get("can_drop", True)
-                        ),  # Default to True?
-                    }
+                # Extract properties, providing defaults if None/missing
+                item_props = item_model.properties or {}
+
+                item_schema = ItemSchema(
+                    # Use a combination of player/item IDs or a dedicated UUID if items needed unique instance IDs
+                    id=f"item_{item_model.id}",  # Use base Item ID for now
+                    name=item_model.name,
+                    description=item_model.description or "",
+                    quantity=inv_item.quantity,  # Get quantity from the association object
+                    rarity=item_props.get("rarity", "common"),
+                    icon=item_props.get("icon"),
+                    canUse=item_props.get("canUse", item_props.get("usable", False)),
+                    canEquip=item_props.get(
+                        "canEquip", item_props.get("equipable", False)
+                    ),
+                    canDrop=item_props.get("canDrop", True),  # Default to droppable
+                    # Add other mapped properties as needed
                 )
                 items_schema_list.append(item_schema)
-            except Exception as e:  # Catch validation errors for individual items
+            except Exception as e:
                 logger.error(
-                    f"Error mapping item data to ItemSchema: {e}. Data: {item_data}"
+                    f"Error mapping inventory item (Item ID: {item_model.id}, Player: {inv_item.player_id}) to ItemSchema: {e}",
+                    exc_info=True,
                 )
-                # Optionally append a placeholder or skip the item
+                # Optionally skip the item or add a placeholder error item
+
         return items_schema_list
-
-    def get_game_state_for_frontend(self, game_state: GameState) -> Dict[str, Any]:
-        """Maps the backend GameState to the structure expected by the frontend API response."""
-        if not game_state or not game_state.player:
-            logger.error("Cannot get frontend state for null GameState or Player.")
-            # Return an empty dict or structure matching frontend expectation but with error state?
-            # Let's return empty for now, caller should handle this.
-            return {}
-
-        player_schema = self._map_player_to_schema(game_state.player)
-        inventory_schema = self._map_inventory_to_schema(game_state.player.inventory)
-        current_room = game_state.current_room or {}
-        room_description = current_room.get("description", "You are lost in the void.")
-        room_title = current_room.get("title", "Unknown Location")
-
-        # Structure matches parts of GetStateResponse and InitialStateResponse schemas
-        return {
-            "playerStats": player_schema.model_dump(),
-            "inventory": [item.model_dump() for item in inventory_schema],
-            "description": room_description,  # The persistent room description
-            "roomTitle": room_title,  # Add room title
-            # Add other fields relevant to frontend state if needed
-            # "available_exits": current_room.get("exits", []), # If frontend needs exits explicitly
-        }
