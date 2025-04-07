@@ -1,4 +1,3 @@
-# backend/app/schemas/game.py
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 
