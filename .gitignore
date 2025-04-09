@@ -51,4 +51,4 @@ dist/
 htmlcov/
 .tox/
 docs/_build/
-*.db
+backend/instance/*.db
