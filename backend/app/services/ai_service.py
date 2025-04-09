@@ -3,6 +3,7 @@ import string
 import requests
 import logging
 from typing import Dict, Any, List, Optional, Tuple
+from ..schemas.ai_responses import AIResponse
 from flask import current_app
 from openai import (
     OpenAI,
@@ -12,7 +13,6 @@ from openai import (
     APIStatusError,
 )
 
-from ..models.ai_responses import AIResponse  # Pydantic model for parsing
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import select
 from ..extensions import db
 from ..models.game import GameState, Player, Item, PlayerInventoryItem
-from ..models.ai_responses import AIResponse
+from ..schemas.ai_responses import AIResponse
 from ..prompts.game_prompts import BASE_SYSTEM_PROMPT, INITIAL_ROOM_PROMPT_USER
 from ..schemas.game import PlayerStatsSchema, ItemSchema  # Pydantic schemas for API
 from ..services.ai_service import AIService, AIResponseError
