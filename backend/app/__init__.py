@@ -20,7 +20,7 @@ def create_app(config_name: str = "development") -> Flask:
     Application Factory Pattern: Creates and configures the Flask application.
 
     Args:
-        config_name (str): The configuration profile to use (e.g., "development", "production", "testing").
+        config_name (str): The configuration profile to use ('development', 'production', 'testing').
 
     Returns:
         Flask: The configured Flask application instance.
@@ -32,73 +32,90 @@ def create_app(config_name: str = "development") -> Flask:
     # --- 1. Load Configuration ---
     selected_config = config.get(config_name)
     if not selected_config:
-        raise ValueError(
-            f"Invalid FLASK_CONFIG: '{config_name}'. Check available configs in config.py"
+        # Fallback to default if invalid config_name provided, or raise error
+        log.warning(
+            f"Invalid FLASK_CONFIG '{config_name}'. Falling back to 'default' ({config['default'].__name__})."
         )
+        selected_config = config["default"]
+        config_name = "default"  # Update config_name to reflect the actual config used
 
     app.config.from_object(selected_config)
-    # Allow overriding config with instance/config.py (if it exists and needed)
-    # app.config.from_pyfile('config.py', silent=True)
 
-    # Perform config-specific initialization (e.g., creating instance folder)
-    if hasattr(selected_config, "init_app"):
-        selected_config.init_app(app)
-
-    # --- 2. Configure Logging ---
-    # Setup logging based on the loaded configuration BEFORE initializing extensions
-    # that might log during setup.
-    configure_logging(app)
+    # --- 2. Configure Logging (using effective config) ---
+    # Logging setup now happens *after* config is loaded but *before* extensions init
+    configure_logging(app)  # Pass the app to use its effective config
     log.info(f"Flask application configured with '{config_name}' profile.")
     log.debug(f"Debug mode: {app.debug}")
+    log.debug(f"Testing mode: {app.testing}")
 
     # --- 3. Initialize Flask Extensions ---
     log.debug("Initializing Flask extensions...")
     # Database ORM
     db.init_app(app)
-    log.debug(f"Database URI: {app.config.get('SQLALCHEMY_DATABASE_URI', 'Not Set')}")
+    # Use app.logger for logging after configure_logging has run
+    app.logger.debug(
+        f"Database URI: {app.config.get('SQLALCHEMY_DATABASE_URI', 'Not Set')}"
+    )
+    if app.config.get("SQLALCHEMY_ENGINE_OPTIONS"):
+        app.logger.debug(
+            f"SQLAlchemy Engine Options: {app.config['SQLALCHEMY_ENGINE_OPTIONS']}"
+        )
     # Database Migrations (requires db)
     migrate.init_app(app, db)
     # API Rate Limiting
     limiter.init_app(app)
     # Cross-Origin Resource Sharing (CORS)
-    # Configuration (origins, credentials support) is pulled from app.config
-    cors.init_app(app)
-    log.debug(f"CORS configured for origins: {app.config.get('CORS_ORIGINS')}")
+    cors.init_app(
+        app,
+        supports_credentials=app.config.get("CORS_SUPPORTS_CREDENTIALS", False),
+        origins=app.config.get("CORS_ORIGINS", []),
+    )
+    app.logger.debug(f"CORS configured for origins: {app.config.get('CORS_ORIGINS')}")
     log.debug("Extensions initialized.")
 
-    # --- 4. Register Blueprints (API Routes) ---
+    # --- 4. Initialize Base Application Settings (like folder creation via Config.init_app) ---
+    # Moved this *after* extension init, especially db init, but before create_all
+    # Config.init_app takes care of logging DB type and creating instance folder if needed
+    if hasattr(selected_config, "init_app"):
+        selected_config.init_app(app)
+
+    # --- 5. Register Blueprints (API Routes) ---
     log.debug("Registering blueprints...")
     register_blueprints(app)
     log.debug("Blueprints registered.")
 
-    # --- 5. Register Error Handlers ---
+    # --- 6. Register Error Handlers ---
     log.debug("Registering error handlers...")
-    register_error_handlers(
-        app
-    )  # Ensure this function exists and is correctly implemented
+    register_error_handlers(app)
     log.debug("Error handlers registered.")
 
-    # --- 6. Development/Testing Convenience: Create DB Tables ---
-    # WARNING: db.create_all() should NOT be relied upon for production schema management
-    #          when using Flask-Migrate/Alembic. Use 'flask db upgrade' instead.
-    #          This is primarily for initial setup in dev/test or with SQLite where migrations might be skipped.
-    if app.config.get("SQLALCHEMY_DATABASE_URI", "").startswith("sqlite"):
+    # --- 7. Create DB Tables (Development/Testing ONLY) ---
+    # **NEVER rely on this in Production.** Use `flask db upgrade` for schema management.
+    if config_name in ("development", "testing"):
         with app.app_context():
-            log.debug("Attempting db.create_all() for SQLite development setup...")
+            app.logger.info(
+                f"Running in '{config_name}' mode. Attempting db.create_all() for initial setup/testing."
+            )
             try:
+                # Reflect checks if tables exist before creating, safe to run multiple times
+                # but doesn't handle migrations (column changes etc.)
                 db.create_all()
-                log.info(
-                    "db.create_all() completed (useful for initial SQLite setup/testing)."
+                app.logger.info(
+                    "db.create_all() completed. Remember to use 'flask db migrate/upgrade' for schema changes."
                 )
             except Exception as e:
-                log.error(f"Error during db.create_all(): {e}", exc_info=True)
-    else:
-        log.info(
-            "Skipping db.create_all() (likely using PostgreSQL/MySQL with migrations). Use 'flask db upgrade'."
+                # Log error, but don't necessarily stop app start. DB might be partially ready or connection failed.
+                app.logger.error(f"Error during db.create_all(): {e}", exc_info=True)
+                app.logger.error(
+                    "Database tables might not be fully created or updated."
+                )
+    else:  # Production or other custom configs
+        app.logger.info(
+            f"Running in '{config_name}' mode. Skipping db.create_all(). "
+            "Database schema MUST be managed using Flask-Migrate ('flask db upgrade')."
         )
 
-    # --- 7. Application Context ---
-    # Example: Log routes if in debug mode
+    # --- 8. Application Context / Final Setup ---
     if app.debug:
         with app.app_context():
             log.debug("Registered URL Rules:")
