@@ -28,6 +28,7 @@ class AIService:
     """
     Handles interactions with AI language models (local Ollama or cloud-based Gemini).
     Manages model selection, prompt formatting, API calls, and response parsing.
+    Includes specific fallback logic for Gemini 403 errors.
     """
 
     def __init__(self):
@@ -74,23 +75,26 @@ class AIService:
 
         logger.debug(f"Checking Ollama availability at {self.local_url}")
         try:
-            # Use a simple request to the base URL or a known endpoint like /api/tags
+            # Use a simple request to the base URL
             response = requests.get(f"{self.local_url}/", timeout=5)
             response.raise_for_status()  # Check for HTTP errors 4xx/5xx
 
-            # Check if the specific model is available via /api/tags
-            tags_response = requests.get(f"{self.local_url}/api/tags", timeout=5)
-            if tags_response.ok:
-                models = tags_response.json().get("models", [])
-                if not any(m["name"] == self.ollama_model for m in models):
+            # Check if the specific model is available
+            try:
+                tags_response = requests.get(f"{self.local_url}/api/tags", timeout=5)
+                if tags_response.ok:
+                    models = tags_response.json().get("models", [])
+                    if not any(m["name"] == self.ollama_model for m in models):
+                        logger.warning(
+                            f"Ollama instance at {self.local_url} is up, but model '{self.ollama_model}' not found."
+                        )
+                else:
                     logger.warning(
-                        f"Ollama instance is up, but model '{self.ollama_model}' not found."
+                        f"Could not verify model list from Ollama at {self.local_url}/api/tags (Status: {tags_response.status_code})"
                     )
-                    # Decide if this counts as 'unavailable' - for now, let's say instance up is enough
-            else:
-                logger.warning(
-                    f"Could not verify model list from Ollama at {self.local_url}/api/tags"
-                )
+            except requests.RequestException as tags_e:
+                logger.warning(f"Failed to check Ollama tags endpoint: {tags_e}")
+                # Proceed assuming base URL check was sufficient if tags check fails
 
             self._local_available = True
             logger.info(
@@ -105,34 +109,28 @@ class AIService:
                 f"Local Ollama instance check failed for {self.local_url}: {e}"
             )
         finally:
-            self._local_checked = True  # Mark as checked regardless of outcome
+            self._local_checked = True  # Mark as checked
 
         return self._local_available
 
     def _format_system_prompt(self, system_template: str, context: dict) -> str:
         """Safely formats the system prompt template with available context."""
         try:
-            # Use string.Formatter().vformat for safe substitution (handles missing keys)
-            # However, simple format with filtered context is often sufficient if keys are known
             template_keys = {
                 fname
                 for _, fname, _, _ in string.Formatter().parse(system_template)
                 if fname
             }
             filtered_context = {k: v for k, v in context.items() if k in template_keys}
-            # Provide default values for any keys still missing in filtered_context but present in template
-            # This prevents KeyErrors if context is incomplete
             for key in template_keys:
-                filtered_context.setdefault(
-                    key, f"<{key}_unavailable>"
-                )  # Placeholder for missing info
+                filtered_context.setdefault(key, f"<{key}_unavailable>")
             return system_template.format(**filtered_context)
         except Exception as e:
             logger.error(
                 f"Error formatting system prompt: {e}. Using raw template.",
                 exc_info=True,
             )
-            return system_template  # Fallback to unformatted template
+            return system_template
 
     def generate_structured_response(
         self,
@@ -142,25 +140,14 @@ class AIService:
         context: Dict[str, Any],
     ) -> Tuple[Optional[AIResponse], Optional[str]]:
         """
-        Generates a structured response from the LLM, handling model selection and parsing.
-
-        Args:
-            system_prompt_template: The template string for the system prompt.
-            history: List of previous chat messages [{"role": ..., "content": ...}].
-            user_command: The current user input.
-            context: Dictionary with dynamic data to fill into the system prompt template.
-
-        Returns:
-            A tuple containing:
-            - AIResponse object if successful, None otherwise.
-            - An error message string if unsuccessful, None otherwise.
+        Generates a structured response, attempting primary AI, with specific fallback
+        from Gemini 403 error to local Ollama.
         """
         system_prompt = self._format_system_prompt(system_prompt_template, context)
         logger.debug(f"Using System Prompt (first 200 chars): {system_prompt[:200]}...")
         logger.debug(f"Current User Command: {user_command}")
         logger.debug(f"Processing with History (length): {len(history)}")
 
-        # Construct the message list for the AI API
         messages = (
             [{"role": "system", "content": system_prompt}]
             + history
@@ -170,135 +157,258 @@ class AIService:
         raw_response_str: Optional[str] = None
         error_message: Optional[str] = None
         service_used: str = "None"
+        attempt_local_fallback: bool = False
+        gemini_403_error_msg: Optional[str] = None
 
-        # Determine which service to use (Local preferred and available? -> Local, else Gemini if configured)
-        use_local_for_this_call = (
-            self.use_local_preference
-            and self.local_url
-            and self._check_local_ollama()  # Re-check availability might be needed if it can go down
+        # --- Determine primary service and attempt ---
+        use_local_initially = (
+            self.use_local_preference and self.local_url and self._check_local_ollama()
         )
 
-        if use_local_for_this_call:
+        if use_local_initially:
+            primary_service = "Ollama"
             service_used = f"Ollama ({self.ollama_model})"
-            logger.info(f"Attempting query to {service_used}")
+            logger.info(f"Attempting query to primary: {service_used}")
             try:
                 raw_response_str = self._query_local(messages)
-            except (ConnectionError, TimeoutError, Exception) as e:
-                logger.error(
-                    f"Local Ollama query failed: {e}. Trying fallback.", exc_info=True
+            except (ConnectionError, TimeoutError, AIResponseError, Exception) as e:
+                logger.warning(
+                    f"Primary local Ollama query failed: {e}. Will attempt fallback to Gemini.",
+                    exc_info=True,
                 )
                 error_message = f"Local AI ({self.ollama_model}) failed: {e}. "
-                use_local_for_this_call = False  # Ensure fallback happens
-
-        # Fallback to Gemini if local failed or wasn't preferred/available
-        if not use_local_for_this_call:
+                # Fall through to try Gemini if available
+        else:
+            primary_service = "Gemini"
             if self.gemini_client:
                 service_used = f"Gemini ({self.gemini_model})"
-                logger.info(f"Attempting query to {service_used}")
+                logger.info(f"Attempting query to primary: {service_used}")
                 try:
                     raw_response_str = self._query_gemini(messages)
-                    error_message = None  # Clear previous error if Gemini succeeds
-                except (ConnectionError, TimeoutError, APIStatusError, Exception) as e:
+                    error_message = (
+                        None  # Clear any previous potential error if successful
+                    )
+                except APIStatusError as e:
+                    logger.error(
+                        f"Gemini API error: Status {e.status_code}, Response: {e.response.text}",
+                        exc_info=True,  # Log full trace for status errors
+                    )
+                    gemini_err_detail = f"Gemini API error (Status {e.status_code}): {(e.body or 'No details')}"
+                    if e.status_code == 403:
+                        logger.warning(
+                            f"Gemini returned 403 Forbidden. Will attempt fallback to local Ollama if available."
+                        )
+                        # Set flag to attempt local fallback *after* this block
+                        attempt_local_fallback = True
+                        gemini_403_error_msg = (
+                            gemini_err_detail  # Store the specific 403 error
+                        )
+                        error_message = (
+                            gemini_err_detail  # Keep error in case fallback fails
+                        )
+                    else:
+                        # Handle other Gemini API errors (non-403)
+                        error_message = gemini_err_detail
+                        raw_response_str = None  # Ensure no partial response
+                except (
+                    APITimeoutError,
+                    APIConnectionError,
+                    RateLimitError,
+                    Exception,
+                ) as e:
+                    # Handle other Gemini connection/timeout/rate limit errors
                     logger.error(f"Gemini query failed: {e}", exc_info=True)
-                    # Append Gemini error to any previous local error
                     error_message = (
                         error_message or ""
                     ) + f"Cloud AI ({self.gemini_model}) failed: {e}"
-                    raw_response_str = None  # Ensure no partial response is used
+                    raw_response_str = None  # Ensure no partial response
             else:
-                # No local success and no Gemini client configured/available
+                # Gemini was preferred/primary but not configured/initialized
                 logger.error(
-                    "No AI service available (Local failed/disabled, and Gemini unavailable/unconfigured)."
+                    "Gemini is the preferred service, but the client is not available."
                 )
-                if not error_message:  # If local wasn't even tried
-                    error_message = "No AI service is available or configured."
-                return None, error_message
+                error_message = (
+                    "Cloud AI service (Gemini) is not configured or available."
+                )
 
-        # --- Parse and Validate the Response ---
-        if not raw_response_str:
-            logger.error(f"Received no response content from {service_used}.")
-            return (
-                None,
-                error_message
-                or f"AI service ({service_used}) returned an empty response.",
+        # --- Handle Fallbacks ---
+
+        # Fallback 1: From Local failure to Gemini
+        if primary_service == "Ollama" and raw_response_str is None:  # If local failed
+            if self.gemini_client:
+                service_used = f"Gemini ({self.gemini_model})"
+                logger.info(
+                    f"Attempting fallback query to {service_used} after local failure."
+                )
+                try:
+                    raw_response_str = self._query_gemini(messages)
+                    # If Gemini succeeds, clear the local error message
+                    error_message = None
+                except APIStatusError as e:
+                    # Handle Gemini errors during fallback, including 403
+                    # We won't fallback again from Gemini 403 here, as local already failed
+                    logger.error(
+                        f"Fallback Gemini API error: Status {e.status_code}, Response: {e.response.text}",
+                        exc_info=True,
+                    )
+                    gemini_err_detail = f"Fallback Cloud AI ({self.gemini_model}) also failed - Gemini API error (Status {e.status_code}): {e.body or 'No details'}"
+                    # Combine with original local error
+                    error_message = (
+                        error_message or "Local AI failed. "
+                    ) + gemini_err_detail
+                    raw_response_str = None
+                except (
+                    APITimeoutError,
+                    APIConnectionError,
+                    RateLimitError,
+                    Exception,
+                ) as e:
+                    logger.error(f"Fallback Gemini query failed: {e}", exc_info=True)
+                    # Combine with original local error
+                    error_message = (
+                        error_message or "Local AI failed. "
+                    ) + f"Fallback Cloud AI ({self.gemini_model}) also failed: {e}"
+                    raw_response_str = None
+            else:
+                # Local failed and no Gemini client available for fallback
+                logger.error(
+                    "Local Ollama failed, and no Gemini client available for fallback."
+                )
+                # Keep the original error_message from the local failure
+
+        # Fallback 2: From Gemini 403 failure to Local (Specific Case)
+        elif attempt_local_fallback:  # This flag is only true if Gemini returned 403
+            if self.local_url and self._check_local_ollama():
+                service_used = f"Ollama ({self.ollama_model})"
+                logger.info(
+                    f"Attempting fallback query to {service_used} after Gemini 403."
+                )
+                try:
+                    raw_response_str = self._query_local(messages)
+                    # If local succeeds, clear the Gemini 403 error message
+                    logger.info(f"Local fallback successful after Gemini 403.")
+                    error_message = None
+                    service_used += (
+                        " (fallback)"  # Indicate fallback in logs/final message
+                    )
+                except (ConnectionError, TimeoutError, AIResponseError, Exception) as e:
+                    logger.error(
+                        f"Local Ollama fallback query failed after Gemini 403: {e}",
+                        exc_info=True,
+                    )
+                    # Keep the original Gemini 403 error and append the local failure reason
+                    error_message = f"{gemini_403_error_msg}. Fallback to Local AI ({self.ollama_model}) also failed: {e}"
+                    raw_response_str = None
+            else:
+                # Gemini had 403, but local is not available for fallback
+                logger.warning(
+                    "Gemini returned 403, but local Ollama is not configured or available for fallback."
+                )
+                # Keep the gemini_403_error_msg as the main error
+                error_message = gemini_403_error_msg
+
+        # --- Final Check and Parse ---
+        if raw_response_str is None:
+            final_error_msg = (
+                error_message or "AI query failed, but no specific error was captured."
             )
+            logger.error(
+                f"AI response generation failed. Final error: {final_error_msg}"
+            )
+            return None, final_error_msg
 
+        # --- Parse and Validate the Successful Response ---
         try:
             logger.debug(
                 f"Raw AI response from {service_used}:\n{raw_response_str[:500]}..."
-            )  # Log snippet
+            )
+            cleaned_response_str = self._clean_raw_response(raw_response_str)
 
-            # Clean potential markdown code blocks
-            cleaned_response_str = raw_response_str.strip()
-            if cleaned_response_str.startswith("```json"):
-                cleaned_response_str = cleaned_response_str[7:]
-                if cleaned_response_str.endswith("```"):
-                    cleaned_response_str = cleaned_response_str[:-3]
-            elif cleaned_response_str.startswith("```"):
-                cleaned_response_str = cleaned_response_str[3:]
-                if cleaned_response_str.endswith("```"):
-                    cleaned_response_str = cleaned_response_str[:-3]
-            elif cleaned_response_str.startswith("{") and cleaned_response_str.endswith(
-                "}"
-            ):
-                # Looks like plain JSON, proceed
-                pass
-            else:
-                # AI might have returned plain text instead of JSON
-                logger.warning(
-                    f"AI response from {service_used} does not appear to be JSON. Content: {cleaned_response_str[:200]}..."
+            if cleaned_response_str is None:
+                raise AIResponseError(
+                    "Response was not valid JSON and no JSON block could be extracted."
                 )
-                # Attempt to find JSON within the string if possible
-                json_start = cleaned_response_str.find("{")
-                json_end = cleaned_response_str.rfind("}")
-                if json_start != -1 and json_end != -1 and json_start < json_end:
-                    logger.info(
-                        "Attempting to extract JSON block from non-JSON response..."
-                    )
-                    cleaned_response_str = cleaned_response_str[
-                        json_start : json_end + 1
-                    ]
-                else:
-                    raise AIResponseError(
-                        "Response was not valid JSON and no JSON block could be extracted."
-                    )
 
             response_data = json.loads(cleaned_response_str)
-            ai_response_obj = AIResponse.model_validate(
-                response_data
-            )  # Use Pydantic validation
+            ai_response_obj = AIResponse.model_validate(response_data)
             logger.debug(f"Successfully parsed AI response from {service_used}.")
-            # logger.debug(f"Parsed AI response object: {ai_response_obj.model_dump_json(indent=2)}")
             return ai_response_obj, None  # Success
-        except json.JSONDecodeError as e:
-            logger.error(
-                f"Failed to decode AI JSON response from {service_used}: {e}",
-                exc_info=True,
-            )
-            logger.error(f"Raw response content was:\n{raw_response_str}")
-            return None, f"AI returned invalid JSON: {e}"
-        except AIResponseError as e:  # Catch our custom JSON extraction error
-            logger.error(
-                f"Failed to process AI response from {service_used}: {e}", exc_info=True
-            )
-            logger.error(f"Raw response content was:\n{raw_response_str}")
-            return None, f"AI response format error: {e}"
-        except (
-            Exception
-        ) as e:  # Catch Pydantic validation errors or other unexpected issues
-            logger.error(
-                f"Failed to validate/process AI response from {service_used}: {e}",
-                exc_info=True,
-            )
-            logger.error(f"Raw response content was:\n{raw_response_str}")
-            # Include details from Pydantic validation error if possible
-            err_detail = str(e)
-            if hasattr(e, "errors"):
-                err_detail = json.dumps(e.errors(), indent=2)
-            return None, f"AI response validation failed: {err_detail}"
 
-    def _query_local(self, messages: List[Dict[str, str]]) -> Optional[str]:
-        """Sends request to local Ollama instance."""
+        except (json.JSONDecodeError, AIResponseError, Exception) as e:
+            # Catch JSON errors, our custom error, Pydantic validation errors etc.
+            logger.error(
+                f"Failed to decode JSON response from {service_used}: {e}",
+                exc_info=True,
+            )
+            logger.error(f"Raw response content was:\n{raw_response_str}")
+            return None, f"AI response JSON decode failed ({service_used}): {str(e)}"
+        except AIResponseError as e:
+            logger.error(
+                f"Failed to validate AI response from {service_used}: {e}",
+                exc_info=True,
+            )
+            logger.error(f"Raw response content was:\n{raw_response_str}")
+            return None, f"AI response validation failed ({service_used}): {str(e)}"
+        except ValueError as e:
+            logger.error(
+                f"Failed to process AI response from {service_used}: {e}",
+                exc_info=True,
+            )
+            logger.error(f"Raw response content was:\n{raw_response_str}")
+            err_detail = str(e)
+            if hasattr(e, "errors"):  # Try to get Pydantic validation details
+                try:
+                    err_detail = json.dumps(e.errors(), indent=2)
+                except Exception:
+                    pass  # Keep original str(e) if errors() fails
+
+            return None, f"AI response processing failed ({service_used}): {err_detail}"
+
+    def _clean_raw_response(self, raw_response_str: str) -> Optional[str]:
+        """Attempts to clean and extract a JSON string from the raw AI response."""
+        cleaned = raw_response_str.strip()
+
+        # Handle markdown code blocks ```json ... ``` or ``` ... ```
+        if cleaned.startswith("```"):
+            # Remove opening ```, optional language specifier (like json) and newline
+            cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3].strip()  # Remove closing ``` and strip again
+
+        # If it looks like JSON now, return it
+        if cleaned.startswith("{") and cleaned.endswith("}"):
+            return cleaned
+        elif cleaned.startswith("[") and cleaned.endswith("]"):  # Allow JSON arrays too
+            return cleaned
+
+        # If not clearly JSON, try to find the first '{' and last '}'
+        logger.warning(
+            f"AI response does not appear to be clean JSON. Content starts: {cleaned[:100]}..."
+        )
+        json_start = cleaned.find("{")
+        json_end = cleaned.rfind("}")
+        if json_start != -1 and json_end != -1 and json_start < json_end:
+            extracted = cleaned[json_start : json_end + 1]
+            # Basic check if the extracted part might be valid JSON
+            try:
+                json.loads(extracted)  # Test parse
+                logger.info(
+                    "Attempting to use extracted JSON block from non-JSON response."
+                )
+                return extracted
+            except json.JSONDecodeError:
+                logger.warning(
+                    f"Extracted block '{extracted[:100]}...' is not valid JSON."
+                )
+                return None  # Extraction failed validation
+
+        logger.error(
+            f"Could not find or extract a valid JSON object from the response."
+        )
+        return None
+
+    def _query_local(self, messages: List[Dict[str, str]]) -> str:
+        """Sends request to local Ollama instance. Raises errors on failure."""
         if not self.local_url:
             raise ConnectionError("Ollama URL not configured.")
 
@@ -306,7 +416,6 @@ class AIService:
             "model": self.ollama_model,
             "messages": messages,
             "stream": False,
-            "format": "json",
         }
         logger.debug(
             f"Ollama request payload (messages omitted): { {k:v for k,v in payload.items() if k != 'messages'} }"
@@ -319,9 +428,10 @@ class AIService:
                 timeout=self.timeout,
                 headers={"Content-Type": "application/json"},
             )
-            response.raise_for_status()  # Check for HTTP 4xx/5xx errors
+            response.raise_for_status()  # Raises HTTPError for 4xx/5xx
             response_json = response.json()
 
+            logger.debug(f"Full Ollama raw JSON response: {response_json}")
             # Ollama's non-streaming JSON response structure
             if (
                 (msg := response_json.get("message"))
@@ -331,7 +441,7 @@ class AIService:
                 logger.debug(
                     f"Extracted local AI response content (length: {len(content)})"
                 )
-                return str(content)  # Ensure it's a string
+                return str(content)
             else:
                 logger.error(
                     f"Unexpected response structure from local Ollama: {response_json}"
@@ -345,56 +455,107 @@ class AIService:
                 f"Local Ollama request timed out after {self.timeout} seconds."
             )
             raise TimeoutError(f"Local LLM request timed out ({self.timeout}s)")
+        except requests.HTTPError as e:
+            # Catch specific HTTP errors from Ollama
+            logger.error(
+                f"Local Ollama request failed with HTTP Status {e.response.status_code}: {e.response.text}"
+            )
+            raise ConnectionError(
+                f"Local LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
+            )  # Include snippet
         except requests.RequestException as e:
-            logger.error(f"Local Ollama request failed: {e}")
+            logger.error(f"Local Ollama communication failed: {e}")
             raise ConnectionError(f"Failed to connect to local LLM: {e}")
+        except Exception as e:
+            logger.error(
+                f"An unexpected error occurred during local Ollama query: {e}",
+                exc_info=True,
+            )
+            raise  # Re-raise unexpected errors
 
-    def _query_gemini(self, messages: List[Dict[str, str]]) -> Optional[str]:
-        """Sends request to Gemini via OpenAI compatible endpoint."""
+    def _query_gemini(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Sends request to Gemini via OpenAI compatible endpoint.
+        Raises specific OpenAI/HTTP errors on failure.
+        """
         if not self.gemini_client:
             raise ConnectionError("Gemini client not initialized.")
 
-        logger.debug(f"Gemini request using model: {self.gemini_model}")
+        processed_messages = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+            # Basic validation/cleaning
+            if role in ["user", "assistant", "system"] and isinstance(content, str):
+                processed_messages.append({"role": role, "content": content})
+            else:
+                logger.warning(f"Skipping invalid message format in history: {msg}")
+
+        logger.debug(
+            f"Gemini request using model: {self.gemini_model}. Message count: {len(processed_messages)}"
+        )
 
         try:
-            response = self.gemini_client.chat.completions.create(
-                model=self.gemini_model,
-                messages=messages,
-                temperature=0.7,
-                timeout=self.timeout,
-            )
-            if response.choices and (msg := response.choices[0].message):
-                result = msg.content
+            completion_params = {
+                "model": self.gemini_model,
+                "messages": processed_messages,
+                "timeout": self.timeout,
+            }
+
+            response = self.gemini_client.chat.completions.create(**completion_params)
+
+            if (
+                response.choices
+                and (choice := response.choices[0])
+                and (msg := choice.message)
+                and (result := msg.content)
+            ):
+                # Log finish reason if available (e.g., 'stop', 'length', 'content_filter')
+                finish_reason = choice.finish_reason
                 logger.debug(
-                    f"Raw Gemini AI response received (length: {len(result or '')})"
+                    f"Raw Gemini AI response received (length: {len(result)}). Finish reason: {finish_reason}"
                 )
+                if finish_reason == "content_filter":
+                    logger.warning(
+                        "Gemini response was blocked due to content filtering."
+                    )
+                    raise AIResponseError("Gemini response blocked by content filter.")
+                elif finish_reason == "length":
+                    logger.warning(
+                        "Gemini response may be truncated due to length limits."
+                    )
+                    # Proceed with the truncated response for now.
+
                 return result
             else:
-                logger.error(f"Unexpected response structure from Gemini: {response}")
+                logger.error(
+                    f"Unexpected response structure or empty content from Gemini: {response}"
+                )
                 raise AIResponseError(
                     "No valid choice or message content received from Gemini."
                 )
-
+        except APIStatusError as e:
+            # This will be caught and handled (including 403 check) in generate_structured_response
+            logger.warning(
+                f"Gemini APIStatusError encountered (Status {e.status_code}). Will be handled by caller."
+            )
+            raise  # Re-raise for the caller to handle the specific status code
         except APITimeoutError:
             logger.error(f"Gemini request timed out after {self.timeout} seconds.")
-            raise TimeoutError(f"Gemini request timed out ({self.timeout}s)")
-        except APIConnectionError as e:
-            logger.error(f"Gemini connection error: {e}")
-            raise ConnectionError(f"Failed to connect to Gemini: {e}")
-        except RateLimitError as e:
-            logger.error(f"Gemini rate limit exceeded: {e}")
-            # Consider specific handling like backoff/retry
-            raise ConnectionError(f"Gemini rate limit exceeded: {e}")
-        except APIStatusError as e:  # Catch HTTP errors from the API
-            logger.error(
-                f"Gemini API error: Status {e.status_code}, Response: {e.response.text}"
-            )
+            raise TimeoutError(
+                f"Gemini request timed out ({self.timeout}s)"
+            )  # Raise standard TimeoutError
+        except (RateLimitError, APIConnectionError) as e:
+            # Let caller handle these specific connection/rate limit issues
+            logger.error(f"Gemini connection/rate limit error: {e}")
             raise ConnectionError(
-                f"Gemini API error (Status {e.status_code}): {e.body.get('message', 'Unknown error') if e.body else 'Unknown error'}"
-            )
+                f"Gemini API error: {e}"
+            )  # Raise standard ConnectionError
         except Exception as e:
+            # Catch any other unexpected errors during the API call
             logger.error(f"Gemini API request failed unexpectedly: {e}", exc_info=True)
-            raise RuntimeError(f"Gemini API error: {e}")
+            # Wrap in a runtime error or re-raise depending on desired higher-level handling
+            raise RuntimeError(f"Unexpected Gemini API error: {e}")
 
     # --- Methods to force switch (maybe for admin endpoint later) ---
     def switch_to_local(self) -> bool:
@@ -408,4 +569,10 @@ class AIService:
         """Force preference to Cloud (Gemini)."""
         logger.info("Switching AI preference to Cloud (Gemini).")
         self.use_local_preference = False
-        return bool(self.gemini_client)  # Available if client is initialized
+        # Cloud is available if the client was successfully initialized
+        is_available = bool(self.gemini_client)
+        if not is_available:
+            logger.warning(
+                "Attempted to switch to Cloud (Gemini), but client is not initialized/available."
+            )
+        return is_available
