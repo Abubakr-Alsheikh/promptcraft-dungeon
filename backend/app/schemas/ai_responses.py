@@ -79,7 +79,7 @@ class AIResponse(BaseModel):
         ...,
         description="Narrative text describing the immediate outcome of the player's action. Should be concise and focus on the direct result of the command.",
     )
-    triggered_events: List[AIEvent] = Field(
+    triggered_events: Optional[List[AIEvent]] = Field(
         default_factory=list,
         description="A list of significant events that occurred as a consequence of the player's action (e.g., combat hits, finding items, triggering traps, status changes). Minor details should be part of action_result_description.",
     )
@@ -91,9 +91,9 @@ class AIResponse(BaseModel):
         None,
         description="Suggested title for the new room, only if 'room_description' is provided.",
     )
-    new_room_exits: Optional[List[str]] = Field(
+    suggested_actions: Optional[List[str]] = Field(
         None,
-        description="Suggested exits (e.g., ['North', 'Mossy Door']) for the new room, only if 'room_description' is provided.",
+        description="List of 3-5 suggested next actions based on the current situation (e.g., ['Examine the altar', 'Search the chest', 'Go north']). Should be short, actionable phrases. Provide only if relevant actions are apparent.",
     )
     sound_effect: Optional[str] = Field(
         None,

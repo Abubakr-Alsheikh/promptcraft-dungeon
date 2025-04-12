@@ -149,6 +149,9 @@ class InitialStateResponse(BaseStateResponse):
     soundEffect: Optional[str] = Field(
         None, description="Optional sound effect suggestion for game start."
     )
+    suggestedActions: Optional[List[str]] = Field(
+        None, description="Initial suggested actions for the player."
+    )
 
     model_config = ConfigDict(extra="ignore")  # Allow other BaseStateResponse fields
 
@@ -186,6 +189,9 @@ class CommandResponse(BaseModel):
     roomsCleared: Optional[int] = Field(
         None, description="Number of rooms/areas cleared."
     )
+    suggestedActions: Optional[List[str]] = Field(
+        None, description="Suggested next actions based on the last command."
+    )
 
     model_config = ConfigDict(extra="ignore")
 
@@ -197,7 +203,6 @@ class GetStateResponse(BaseStateResponse):
         "Current game state retrieved.",
         description="Confirmation message for state retrieval.",
     )
-    # soundEffect usually not applicable for just getting state
     soundEffect: Optional[str] = Field(
         None, description="Optional sound effect suggestion (usually None here)."
     )

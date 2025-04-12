@@ -29,31 +29,32 @@ class GameService:
 
     def start_new_game(
         self, player_name: str, difficulty: str
-    ) -> Tuple[Optional[GameState], Optional[str]]:
+    ) -> Tuple[
+        Optional[GameState], Optional[AIResponse], Optional[str]
+    ]:  # MODIFIED return type
         """
         Initializes a new game: creates Player & GameState, gets the first
         room description from AI, saves initial state and chat history.
 
         Returns:
-            Tuple (GameState object, None) on success.
-            Tuple (None, error_message) on failure.
+            Tuple (GameState object, AIResponse object, None) on success.
+            Tuple (None, None, error_message) on failure.
         """
         logger.info(
             f"Attempting to start new game for player '{player_name}', difficulty '{difficulty}'"
         )
         try:
             # 1. Create Player and GameState objects (without saving yet)
-            player = Player(name=player_name, gold=10)  # Defaults set in model
+            player = Player(name=player_name, gold=10)
             game_state = GameState(player=player, difficulty=difficulty)
-            # Add to session early so relationships can work if needed immediately
             db.session.add(game_state)
-            # Flush to get IDs assigned, but don't commit yet
             db.session.flush()
             logger.debug(
                 f"Created initial Player ID: {player.id}, GameState ID: {game_state.id}"
             )
 
             # 2. Prepare context for initial AI room generation
+            # Pass empty command, as context builder expects one
             context = self._build_ai_context(game_state, command="<INITIAL_GENERATION>")
             initial_user_prompt = INITIAL_ROOM_PROMPT_USER.format(
                 player_name=player.name, difficulty=game_state.difficulty
@@ -63,7 +64,7 @@ class GameService:
             initial_ai_response, ai_error = (
                 self.ai_service.generate_structured_response(
                     system_prompt_template=BASE_SYSTEM_PROMPT,
-                    history=[],  # No history for the very first call
+                    history=[],
                     user_command=initial_user_prompt,
                     context=context,
                 )
@@ -74,28 +75,27 @@ class GameService:
                     f"AI failed to generate initial room: {ai_error or 'No response'}"
                 )
                 logger.error(error_msg)
-                # Rollback changes if AI fails startup
                 db.session.rollback()
-                return None, error_msg
+                return None, None, error_msg  # MODIFIED return
 
-            # Ensure essential part of response is present
             if not initial_ai_response.action_result_description:
                 error_msg = "AI response for initial room lacked essential 'action_result_description'."
                 logger.error(error_msg)
                 db.session.rollback()
-                return None, error_msg
+                return None, None, error_msg  # MODIFIED return
 
             logger.debug("AI generated initial room successfully.")
 
             # 4. Set the initial room state based on AI response
             initial_description = initial_ai_response.action_result_description
             initial_title = initial_ai_response.new_room_title or "The Beginning"
-            initial_exits = initial_ai_response.new_room_exits or []
+            # REMOVED: initial_exits = initial_ai_response.new_room_exits or []
             # Use the setter for current_room
             game_state.current_room = {
                 "title": initial_title,
                 "description": initial_description,
-                "exits": initial_exits,
+                # REMOVED: "exits": initial_exits,
+                "exits": [],  # Set exits to empty list initially, can be updated narratively
                 "events": [
                     evt.model_dump() for evt in initial_ai_response.triggered_events
                 ],
@@ -103,17 +103,15 @@ class GameService:
             logger.debug(f"Initial room set: '{initial_title}'")
 
             # 5. Initialize Chat History with the AI's first message
-            # Store the structured AI response as a JSON string in the content
             initial_ai_content_json = initial_ai_response.model_dump_json()
             game_state.add_chat_message(
                 role="assistant",
                 content=initial_ai_content_json,
-                turn_number=0,  # First turn (AI introduces scene)
+                turn_number=0,
             )
             logger.debug("Initial chat history added.")
 
-            # 6. Apply any effects from initial AI response (e.g., maybe AI gives starting item)
-            # This is unlikely for initial prompt but possible
+            # 6. Apply any effects from initial AI response
             self._apply_ai_effects(player, initial_ai_response)
 
             # 7. Commit the entire transaction
@@ -122,13 +120,15 @@ class GameService:
                 f"New game (ID: {game_state.id}) started successfully for player '{player.name}'."
             )
 
-            return game_state, None
+            # MODIFIED return: Return GameState and the successful AIResponse
+            return game_state, initial_ai_response, None
 
         except Exception as e:
             db.session.rollback()
             logger.exception(f"Unexpected error starting new game: {e}")
             return (
                 None,
+                None,  # MODIFIED return
                 f"An unexpected server error occurred during game creation: {e}",
             )
 
@@ -145,8 +145,7 @@ class GameService:
         logger.info(f"Handling command '{command}' for game ID {game_state_id}")
         game_state: Optional[GameState] = None
         try:
-            # 1. Load Game State and Player (with necessary relationships)
-            # Use joinedload/selectinload for efficiency if accessing relationships often
+            # 1. Load Game State and Player
             game_state = db.session.get(
                 GameState,
                 game_state_id,
@@ -154,7 +153,7 @@ class GameService:
                     selectinload(GameState.player)
                     .selectinload(Player.inventory_items)
                     .joinedload(PlayerInventoryItem.item),
-                    selectinload(GameState.chat_messages),  # Load history efficiently
+                    selectinload(GameState.chat_messages),
                 ],
             )
 
@@ -167,7 +166,7 @@ class GameService:
 
             # 2. Get chat history formatted for AI
             history = game_state.get_chat_history_for_ai()
-            current_turn = len(history)  # Next turn number (0-indexed)
+            current_turn = len(history)
             logger.debug(f"History length for AI: {len(history)}")
 
             # 3. Prepare Context & Call AI Service
@@ -185,14 +184,9 @@ class GameService:
                 logger.error(
                     f"{error_msg} for game {game_state_id}, command '{command}'"
                 )
-                # Do NOT commit any changes. Return the state *before* the failed command attempt.
-                # Do NOT add the failed command/response to history.
-                return game_state, None, error_msg  # Return original state
+                return game_state, None, error_msg
 
             logger.debug(f"AI Response received for command '{command}'.")
-            # logger.debug(f"AI Response data: {ai_response.model_dump_json(indent=2)}")
-
-            # --- If AI Success, proceed with updates ---
 
             # 5. Add User Command and AI Response to Chat History
             game_state.add_chat_message(
@@ -212,7 +206,7 @@ class GameService:
             logger.debug("Applied AI effects to player state.")
 
             # 7. Update Room State if Necessary
-            current_room_data = game_state.current_room or {}  # Get mutable dict
+            current_room_data = game_state.current_room or {}
             if ai_response.room_description:  # AI indicates a move to a NEW room
                 logger.info(
                     f"Player moving to new area in game {game_state_id}. AI Title: '{ai_response.new_room_title}'"
@@ -221,26 +215,26 @@ class GameService:
                 game_state.current_room = {
                     "title": new_title,
                     "description": ai_response.room_description,
-                    "exits": ai_response.new_room_exits or [],
-                    "events": [],  # Reset room-specific events upon entering a new one? Or use triggered_events? Simple reset for now.
+                    # REMOVED: "exits": ai_response.new_room_exits or [],
+                    "exits": [],  # Exits are now implicitly defined by description/actions
+                    "events": [],  # Reset room-specific events upon entering a new one
                 }
-                game_state.rooms_cleared += (
-                    1  # Increment counter for moving to new area
-                )
+                game_state.rooms_cleared += 1
                 logger.debug(
                     f"Updated current_room to '{new_title}'. Rooms cleared: {game_state.rooms_cleared}"
                 )
             else:
-                # Player remains in the same room. Only the AI's 'action_result_description' provides feedback.
-                # The persistent 'current_room.description' is NOT updated here.
-                # We *could* potentially update the room's 'events' list based on ai_response.triggered_events
-                # if an action modified the current room (e.g., revealed something). Requires careful design.
+                # Player remains in the same room.
                 logger.debug(
                     f"Player remains in room '{current_room_data.get('title', 'current')}'"
                 )
-                # No change needed to game_state.current_room property itself if description isn't changing.
+                # Update events in the current room if AI triggered some
+                # This part needs careful consideration: do events append, replace, or get handled differently?
+                # For simplicity, let's assume triggered_events from AI apply globally via _apply_ai_effects
+                # and don't modify the persistent room 'events' list unless explicitly designed to.
+                # current_room_data["events"] = [evt.model_dump() for evt in ai_response.triggered_events] # Example if updating room events
 
-            # 8. Commit all changes (history, player state, room state)
+            # 8. Commit all changes
             db.session.commit()
             logger.info(
                 f"Game state {game_state_id} updated successfully after command '{command}'."
@@ -250,25 +244,21 @@ class GameService:
             return game_state, ai_response, None
 
         except Exception as e:
-            db.session.rollback()  # Rollback on any unexpected error during processing
+            db.session.rollback()
             logger.exception(
                 f"Unexpected error handling command '{command}' for game {game_state_id}: {e}"
             )
-            # Return None for state to indicate a critical failure. The route handler should signal 500.
             return None, None, f"An unexpected server error occurred: {e}"
 
     def _build_ai_context(self, game_state: GameState, command: str) -> Dict[str, Any]:
         """Helper to create the context dictionary for AI system prompts."""
         player = game_state.player
-        room = game_state.current_room or {}  # Use property getter
+        room = game_state.current_room or {}
 
-        # Fetch inventory details using the relationship
         inventory_list = []
-        # Ensure items are loaded - they should be if using eager loading in handle_player_command
         if player and player.inventory_items:
-            # Access related item details via the relationship
             for inv_item in player.inventory_items:
-                if inv_item.item:  # Check if item relationship loaded
+                if inv_item.item:
                     name = inv_item.item.name
                     qty = inv_item.quantity
                     inventory_list.append(f"{name} (x{qty})")
@@ -277,6 +267,13 @@ class GameService:
                         f"Inventory item entry missing related Item data for player {player.id}"
                     )
         inventory_str = ", ".join(inventory_list) if inventory_list else "Empty"
+
+        # Extract exits from current room description if needed, or keep it simple
+        # For now, let's remove sending explicit exits, the AI should infer from description.
+        # current_exits_str = ", ".join(room.get("exits", []))
+        current_exits_str = (
+            "Not explicitly listed"  # Or try parsing from description (fragile)
+        )
 
         context = {
             "difficulty": game_state.difficulty,
@@ -290,7 +287,8 @@ class GameService:
             "current_room_description": room.get(
                 "description", "You are in a featureless location."
             ),
-            "current_room_exits": ", ".join(room.get("exits", [])),
+            # MODIFIED: Removed reliance on structured exits from game state json
+            "current_room_exits": current_exits_str,
             "player_command": command,
         }
         return context
@@ -488,12 +486,11 @@ class GameService:
 
         try:
             player_schema = self._map_player_to_schema(game_state.player)
-            # Ensure inventory items and their related item details are loaded
             inventory_schema_list = self._map_inventory_to_schema(
                 game_state.player.inventory_items
             )
 
-            current_room = game_state.current_room  # Use property
+            current_room = game_state.current_room
             room_description = (
                 current_room.get("description", "Error: Room data missing.")
                 if current_room
@@ -504,13 +501,15 @@ class GameService:
                 if current_room
                 else "Nowhere"
             )
+            # If frontend needs exits, they'd need to be parsed or handled differently now
+            # room_exits = current_room.get("exits", []) if current_room else []
 
             return {
                 "playerStats": player_schema.model_dump(),
                 "inventory": [item.model_dump() for item in inventory_schema_list],
                 "description": room_description,
                 "roomTitle": room_title,
-                # Add other top-level state info if needed by frontend
+                # "roomExits": room_exits, # Example if needed
                 "difficulty": game_state.difficulty,
                 "roomsCleared": game_state.rooms_cleared,
             }
