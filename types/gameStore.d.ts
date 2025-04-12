@@ -1,4 +1,3 @@
-// types/gameStore.d.ts
 import { PlayerStatsData, Item, LogEntry } from "@/types/game";
 
 // --- Slice Interfaces (Define the shape of each part) ---
@@ -7,11 +6,12 @@ export interface GameStateSliceState {
   gameId: number | null;
   playerStats: PlayerStatsData | null;
   inventory: Item[];
-  description: string; // Persistent room/location description
-  roomTitle: string | null; // Title of the current room/location
+  description: string;
+  roomTitle: string | null;
   logs: LogEntry[];
   isStartingGame: boolean;
   isProcessingCommand: boolean;
+  suggestedActions: string[] | null;
 }
 
 export interface GameStateSliceActions {
@@ -21,7 +21,7 @@ export interface GameStateSliceActions {
   resetGameState: () => void;
 }
 
-export type ItemSliceState = unknown; // Assuming no state directly owned here
+export type ItemSliceState = unknown;
 
 export interface ItemSliceActions {
   useItem: (itemId: string) => Promise<void>;
@@ -29,6 +29,7 @@ export interface ItemSliceActions {
   dropItem: (itemId: string) => Promise<void>;
 }
 
+// --- UI Slice ---
 export interface UISliceState {
   isInventoryOpen: boolean;
   isSettingsOpen: boolean;
@@ -39,6 +40,7 @@ export interface UISliceActions {
   toggleSettings: (open?: boolean) => void;
 }
 
+// --- Settings Slice ---
 export interface SettingsSliceState {
   animationSpeed: number;
   masterVolume: number;
@@ -51,6 +53,7 @@ export interface SettingsSliceActions {
   setEffectsVolume: (volume: number) => void;
 }
 
+// --- Sound Slice ---
 export interface SoundSliceState {
   lastSoundEffect: string | null;
 }
@@ -60,27 +63,32 @@ export interface SoundSliceActions {
 }
 
 // --- Combined Store Type ---
-
 export type GameStoreState = GameStateSliceState &
   ItemSliceState &
   UISliceState &
   SettingsSliceState &
-  SoundSliceState &
-  GameStateSliceActions &
+  SoundSliceState;
+
+export type GameStoreActions = GameStateSliceActions &
   ItemSliceActions &
   UISliceActions &
   SettingsSliceActions &
   SoundSliceActions;
 
+// --- Combined Store Interface ---
+export type GameStore = GameStoreState & GameStoreActions;
+
 // Type for the Zustand creator function's arguments
+// Using GameStore for simpler type definition in create function
 export type GameStoreCreator = (
-  set: import("zustand").StoreApi<GameStoreState>["setState"],
-  get: import("zustand").StoreApi<GameStoreState>["getState"],
-  api: import("zustand").StoreApi<GameStoreState>
-) => GameStoreState;
+  set: import("zustand").StoreApi<GameStore>["setState"],
+  get: import("zustand").StoreApi<GameStore>["getState"],
+  api: import("zustand").StoreApi<GameStore>
+) => GameStore; // Should return the combined GameStore type
 
 // Type for individual slice creators
+// T represents the slice's state & actions combined
 export type SliceCreator<T> = (
-  set: import("zustand").StoreApi<GameStoreState>["setState"],
-  get: import("zustand").StoreApi<GameStoreState>["getState"]
+  set: import("zustand").StoreApi<GameStore>["setState"],
+  get: import("zustand").StoreApi<GameStore>["getState"]
 ) => T;

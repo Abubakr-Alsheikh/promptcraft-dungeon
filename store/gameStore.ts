@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { GameStoreState } from "@/types/gameStore"; // Import the combined type
+import { GameStore } from "@/types/gameStore";
 
 // Import slice creators
 import { createGameStateSlice } from "./slices/gameStateSlice";
@@ -9,7 +9,7 @@ import { createUISlice } from "./slices/uiSlice";
 import { createSettingsSlice } from "./slices/settingsSlice";
 import { createSoundSlice } from "./slices/soundSlice";
 
-export const useGameStore = create<GameStoreState>()(
+export const useGameStore = create<GameStore>()(
   persist(
     (set, get, api) => ({
       // Combine slices by calling their creator functions

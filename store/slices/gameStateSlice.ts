@@ -1,4 +1,3 @@
-// store/slices/gameStateSlice.ts
 import {
   GameStateSliceState,
   GameStateSliceActions,
@@ -18,12 +17,14 @@ const initialGameStateSliceState: GameStateSliceState = {
   playerStats: null,
   inventory: [],
   description: "Prepare for your adventure...",
-  roomTitle: null, // Initialize roomTitle
+  roomTitle: null,
   logs: [],
   isStartingGame: false,
   isProcessingCommand: false,
+  suggestedActions: null,
 };
 
+// Use the specific SliceCreator<T> type where T combines state and actions for this slice
 export const createGameStateSlice: SliceCreator<
   GameStateSliceState & GameStateSliceActions
 > = (set, get) => ({
@@ -35,15 +36,16 @@ export const createGameStateSlice: SliceCreator<
       id: Date.now() + Math.random(),
       timestamp: new Date(),
     };
-    const maxLogs = 100; // Keep max logs
+    const maxLogs = 100;
     set((state) => ({ logs: [...state.logs, newLog].slice(-maxLogs) }));
   },
 
   resetGameState: () => {
     set({
       ...initialGameStateSliceState,
-      logs: [], // Clear logs explicitly on reset
+      logs: [], // Clear logs
       roomTitle: null, // Reset roomTitle
+      suggestedActions: null, // Reset suggestions
     });
     get()._addLog({ type: "system", text: "Game state reset." });
     console.log("Game state reset.");
@@ -54,11 +56,12 @@ export const createGameStateSlice: SliceCreator<
     set({
       isStartingGame: true,
       description: "Generating your world...",
-      roomTitle: "Loading...", // Set initial title during load
+      roomTitle: "Loading...",
       logs: [],
       gameId: null,
       playerStats: null,
       inventory: [],
+      suggestedActions: null,
     });
     get()._addLog({ type: "system", text: "Starting new game..." });
 
@@ -73,17 +76,19 @@ export const createGameStateSlice: SliceCreator<
       set({
         gameId: response.game_id,
         playerStats: response.playerStats,
-        inventory: response.inventory, // Use 'inventory' key from response
-        description: response.description, // Set persistent description
-        roomTitle: response.roomTitle || "Unknown Area", // Set room title, provide default
+        inventory: response.inventory,
+        description: response.description,
+        roomTitle: response.roomTitle || "Unknown Area",
         isStartingGame: false,
+        suggestedActions: response.suggestedActions || null,
+        lastSoundEffect: response.soundEffect || null,
       });
-      // Add initial logs after successful start
-      get()._addLog({ type: "system", text: response.message }); // Welcome message
-      get()._addLog({ type: "narration", text: response.description }); // Initial room description log
+
+      get()._addLog({ type: "system", text: response.message });
+      get()._addLog({ type: "narration", text: response.description });
 
       notifySuccess("Game Started!", response.message);
-      return true; // Indicate success
+      return true;
     } catch (error: any) {
       console.error("Failed to start game:", error);
       const errorMessage =
@@ -91,18 +96,19 @@ export const createGameStateSlice: SliceCreator<
       notifyError("Error Starting Game", errorMessage);
       set({
         description: `Error: ${errorMessage}. Please try again.`,
-        roomTitle: "Error", // Indicate error in title
+        roomTitle: "Error",
         isStartingGame: false,
         gameId: null,
         playerStats: null,
         inventory: [],
         logs: [],
+        suggestedActions: null,
       });
       get()._addLog({
         type: "error",
         text: `Failed to start: ${errorMessage}`,
       });
-      return false; // Indicate failure
+      return false;
     }
   },
 
@@ -119,11 +125,11 @@ export const createGameStateSlice: SliceCreator<
     }
 
     const { notifySuccess, notifyError } = useNotificationStore.getState();
-    // Store previous state in case of API error (optional, but good practice)
+    const previousSuggestions = get().suggestedActions;
     const previousDescription = get().description;
     const previousRoomTitle = get().roomTitle;
 
-    set({ isProcessingCommand: true });
+    set({ isProcessingCommand: true, suggestedActions: null });
     get()._addLog({ type: "player", text: `> ${command}` });
 
     try {
@@ -134,41 +140,38 @@ export const createGameStateSlice: SliceCreator<
 
       console.log("sendCommand response received:", result);
 
-      // Update state based on successful response
       set({
-        description: result.description, // Update persistent description
-        roomTitle: result.roomTitle || previousRoomTitle || "Unknown Area", // Update title, keep previous if null, provide default
+        description: result.description,
+        roomTitle: result.roomTitle || previousRoomTitle || "Unknown Area",
         playerStats: result.playerStats,
-        inventory: result.updatedInventory, // Use 'updatedInventory' key
+        inventory: result.updatedInventory,
         isProcessingCommand: false,
-        lastSoundEffect: result.soundEffect || null, // Handle sound effect
+        lastSoundEffect: result.soundEffect || null,
+        suggestedActions: result.suggestedActions || null,
       });
 
-      // Add the action result message to the log
       if (result.message) {
         get()._addLog({ type: "narration", text: result.message });
       }
 
-      // Show notification based on success flag
       if (result.success) {
-        // Use result.message for notification if available and meaningful
         notifySuccess("Action", result.message || "Action completed.");
       } else {
-        // Handle structured failure from backend
         const failureMsg = result.message || "Action failed.";
         get()._addLog({ type: "error", text: failureMsg });
         notifyError("Action Failed", failureMsg);
+        set({ suggestedActions: previousSuggestions });
       }
     } catch (error: any) {
       console.error("Error sending command:", error);
       const errorMessage =
         error.message || "Failed to communicate with the server.";
       notifyError("API Error", errorMessage);
-      // Revert description/title on error? Optional.
       set({
-        // description: previousDescription, // Option to revert
-        // roomTitle: previousRoomTitle,   // Option to revert
+        description: previousDescription,
+        roomTitle: previousRoomTitle,
         isProcessingCommand: false,
+        suggestedActions: null,
       });
       get()._addLog({
         type: "error",

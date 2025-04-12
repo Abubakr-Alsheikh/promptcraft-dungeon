@@ -1,7 +1,7 @@
 "use client";
 
 import { Box, Flex, Spinner, Text } from "@chakra-ui/react";
-import { ReactNode, useEffect, useCallback } from "react"; // Added useCallback
+import { ReactNode, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { GameHeader } from "@/components/layout/GameHeader";
 import { GameFooter } from "@/components/layout/GameFooter";
@@ -28,6 +28,7 @@ export default function GameLayout({ children }: GameLayoutProps) {
     masterVolume,
     effectsVolume,
     lastSoundEffect,
+    suggestedActions,
     // Actions
     sendCommand,
     useItem,
@@ -40,11 +41,10 @@ export default function GameLayout({ children }: GameLayoutProps) {
     setEffectsVolume,
     clearLastSoundEffect,
   } = useGameStore();
-
-  // --- Get sound manager ---
+  console.log(suggestedActions);
   const soundManager = useSoundManager();
 
-  // --- Redirect Logic ---
+  // --- Redirect Logic (remains the same) ---
   useEffect(() => {
     if (!isStartingGame && (!gameId || !playerStats)) {
       console.log(
@@ -55,16 +55,11 @@ export default function GameLayout({ children }: GameLayoutProps) {
       );
       router.replace("/");
     } else {
-      console.log(
-        "GameLayout: Guard passed. gameId:",
-        gameId,
-        "isStartingGame:",
-        isStartingGame
-      );
+      // console.log("GameLayout: Guard passed. gameId:", gameId, "isStartingGame:", isStartingGame);
     }
   }, [gameId, playerStats, isStartingGame, router]);
 
-  // --- Volume Sync Effects ---
+  // --- Volume Sync Effects (remain the same) ---
   useEffect(() => {
     soundManager.setMasterVolume(masterVolume);
   }, [masterVolume, soundManager]);
@@ -73,31 +68,22 @@ export default function GameLayout({ children }: GameLayoutProps) {
     soundManager.setEffectsVolume(effectsVolume);
   }, [effectsVolume, soundManager]);
 
-  // --- Define Callbacks for Footer Actions ---
-  const handleLookCommand = useCallback(() => {
-    if (!isProcessingCommand) {
-      sendCommand("look around");
-    }
-  }, [sendCommand, isProcessingCommand]);
-
+  // --- Inventory Toggle Callback (still needed for HEADER) ---
   const handleInventoryToggle = useCallback(() => {
     toggleInventory(true); // Explicitly open
   }, [toggleInventory]);
 
-  // --- NEW: Effect to play sound ---
+  // --- Sound Effect Player (remains the same) ---
   useEffect(() => {
     if (lastSoundEffect && soundManager.isInitialized) {
       console.log(`Playing sound effect from state: ${lastSoundEffect}`);
-      soundManager.playSound(lastSoundEffect, true); // Play sound (force restart if needed)
-      // Clear the effect from state immediately after triggering play
-      // to prevent re-playing on re-renders
+      soundManager.playSound(lastSoundEffect, true);
       clearLastSoundEffect();
     }
   }, [lastSoundEffect, soundManager, clearLastSoundEffect]);
 
   // --- Loading States (remain the same) ---
   if (isStartingGame) {
-    // ... loading spinner ...
     return (
       <Flex
         justify="center"
@@ -115,7 +101,6 @@ export default function GameLayout({ children }: GameLayoutProps) {
     );
   }
   if (!gameId || !playerStats) {
-    // ... loading spinner ...
     return (
       <Flex
         justify="center"
@@ -134,6 +119,7 @@ export default function GameLayout({ children }: GameLayoutProps) {
   // --- Render Full Game UI ---
   return (
     <Flex direction="column" minH="100vh" bg="brand.bgDark" color="brand.text">
+      {/* Header still needs its inventory toggle */}
       <GameHeader
         playerStats={playerStats}
         onOpenSettings={() => toggleSettings(true)}
@@ -151,14 +137,14 @@ export default function GameLayout({ children }: GameLayoutProps) {
         {children}
       </Box>
 
-      {/* Pass the new callbacks to GameFooter */}
+      {/* Pass suggestedActions and sendCommand to Footer */}
       <GameFooter
         onCommandSubmit={sendCommand}
         isProcessingCommand={isProcessingCommand}
-        onLookAction={handleLookCommand} // Pass look action handler
-        onInventoryAction={handleInventoryToggle} // Pass inventory toggle handler
+        suggestedActions={suggestedActions} // <-- Pass down
       />
 
+      {/* Modals remain the same */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => toggleSettings(false)}
