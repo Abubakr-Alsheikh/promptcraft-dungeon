@@ -6,21 +6,21 @@ import {
   IconButton,
   HStack,
   Tooltip,
+  Text,
 } from "@chakra-ui/react";
 import { GiCog, GiBackpack } from "react-icons/gi";
-import { PlayerStats, PlayerStatsData } from "@/components/game/PlayerStats";
+import { PlayerStats } from "@/components/game/PlayerStats";
+import { useGameStore } from "@/store/gameStore";
 
-interface GameHeaderProps {
-  playerStats: PlayerStatsData;
-  onOpenSettings: () => void;
-  onOpenInventory: () => void;
-}
+export function GameHeader() {
+  const playerStats = useGameStore((state) => state.playerStats);
+  const toggleSettings = useGameStore((state) => state.toggleSettings);
+  const toggleInventory = useGameStore((state) => state.toggleInventory);
 
-export function GameHeader({
-  playerStats,
-  onOpenSettings,
-  onOpenInventory,
-}: GameHeaderProps) {
+  if (!playerStats) {
+    return null;
+  }
+
   return (
     <Flex
       as="header"
@@ -38,12 +38,11 @@ export function GameHeader({
         fontFamily="heading"
         mr={4}
       >
-        PromptCraft: Dungeon Delver
+        PromptCraft
+        <Text display={{ base: "none", md: "inline" }}>: Dungeon Delver</Text>
       </Heading>
       <Spacer />
-      <Box flexShrink={0} mx={4}>
-        {" "}
-        {/* Prevent player stats from causing wrap too early */}
+      <Box flexShrink={0} mx={{ base: 2, md: 4 }}>
         <PlayerStats stats={playerStats} />
       </Box>
       <HStack spacing={2}>
@@ -54,7 +53,7 @@ export function GameHeader({
             variant="ghost"
             color="gray.400"
             _hover={{ color: "brand.accent", bg: "gray.700" }}
-            onClick={onOpenInventory}
+            onClick={() => toggleInventory(true)}
           />
         </Tooltip>
         <Tooltip label="Settings" placement="bottom" hasArrow>
@@ -64,7 +63,7 @@ export function GameHeader({
             variant="ghost"
             color="gray.400"
             _hover={{ color: "brand.accent", bg: "gray.700" }}
-            onClick={onOpenSettings}
+            onClick={() => toggleSettings(true)}
           />
         </Tooltip>
       </HStack>

@@ -1,20 +1,18 @@
 import { Box, VStack, Wrap, WrapItem, Text } from "@chakra-ui/react";
 import { PlayerInput } from "@/components/game/PlayerInput";
 import { ActionButton } from "@/components/ui/ActionButton";
-interface GameFooterProps {
-  onCommandSubmit: (command: string) => void;
-  isProcessingCommand: boolean;
-  suggestedActions: string[] | null;
-}
+import { useGameStore } from "@/store/gameStore";
 
-export function GameFooter({
-  onCommandSubmit,
-  isProcessingCommand,
-  suggestedActions,
-}: GameFooterProps) {
+export function GameFooter() {
+  const sendCommand = useGameStore((state) => state.sendCommand);
+  const isProcessingCommand = useGameStore(
+    (state) => state.isProcessingCommand
+  );
+  const suggestedActions = useGameStore((state) => state.suggestedActions);
+
   const handleSuggestionClick = (suggestion: string) => {
     if (!isProcessingCommand) {
-      onCommandSubmit(suggestion);
+      sendCommand(suggestion);
     }
   };
 
@@ -24,7 +22,7 @@ export function GameFooter({
       p={4}
       bg="brand.bg"
       borderTopWidth={1}
-      borderColor="brand.border"
+      borderColor="brand.primary"
     >
       <VStack spacing={4} align="stretch">
         {/* Suggested Actions Area */}
@@ -33,18 +31,19 @@ export function GameFooter({
             <Text fontSize="sm" color="brand.text" mb={2} textAlign="center">
               Suggestions:
             </Text>
-            {/* Use Wrap for responsiveness */}
             <Wrap spacing={2} justify="center">
               {suggestedActions.map((suggestion) => (
                 <WrapItem key={suggestion}>
-                  {/* Use ActionButton or simpler Button */}
                   <ActionButton
                     label={suggestion}
                     onClickAction={() => handleSuggestionClick(suggestion)}
-                    isDisabled={isProcessingCommand}
-                    size="sm" // Make buttons slightly smaller
-                    variant="outline" // Different visual style for suggestions
-                    colorScheme="teal" // Use theme color
+                    isDisabled={isProcessingCommand} // Use state from store
+                    size="sm"
+                    variant="outline"
+                    colorScheme="teal" // Consider using a brand color? e.g., primary/secondary
+                    borderColor="brand.secondary" // Example
+                    color="brand.text"
+                    _hover={{ bg: "brand.secondary", color: "white" }}
                   />
                 </WrapItem>
               ))}
@@ -52,11 +51,11 @@ export function GameFooter({
           </Box>
         )}
 
-        {/* Input remains the same */}
+        {/* Player Input Component */}
         <PlayerInput
-          onSubmitCommand={onCommandSubmit}
-          isLoading={isProcessingCommand}
-          focusInput={true}
+          onSubmitCommand={sendCommand} // Pass action from store
+          isLoading={isProcessingCommand} // Pass state from store
+          focusInput={true} // Keep focus logic
         />
       </VStack>
     </Box>

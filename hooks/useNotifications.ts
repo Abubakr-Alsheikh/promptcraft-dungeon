@@ -1,11 +1,13 @@
-import { useToast, UseToastOptions } from "@chakra-ui/react";
+import { UseToastOptions } from "@chakra-ui/react";
 import { create } from "zustand";
 
 type NotificationStatus = "success" | "error" | "warning" | "info";
 
 interface NotificationStore {
-  toast: ((options?: UseToastOptions) => void) | null;
-  setToast: (toast: (options?: UseToastOptions) => void) => void;
+  toast: ((options?: UseToastOptions) => string | number | undefined) | null;
+  setToast: (
+    toast: (options?: UseToastOptions) => string | number | undefined
+  ) => void;
   showNotification: (
     title: string,
     description?: string,
@@ -36,20 +38,28 @@ interface NotificationStore {
 
 export const useNotificationStore = create<NotificationStore>((set, get) => ({
   toast: null,
-  setToast: (toast) => set({ toast }),
+  setToast: (toastFn) => set({ toast: toastFn }), // Correctly store the function
+
   showNotification: (title, description = "", status = "info", options) => {
     const { toast } = get();
-    toast?.({
-      title,
-      description,
-      status,
-      duration: 5000,
-      isClosable: true,
-      position: "top-right",
-      variant: "subtle",
-      ...options,
-    });
+    if (toast) {
+      toast({
+        title,
+        description,
+        status,
+        duration: 5000,
+        isClosable: true,
+        position: "top-right",
+        variant: "solid",
+        ...options,
+      });
+    } else {
+      console.warn(
+        "Toast function not available in notification store. Was NotificationProvider rendered?"
+      );
+    }
   },
+  // Convenience methods remain the same
   notifySuccess: (title, description, options) =>
     get().showNotification(title, description, "success", options),
   notifyError: (title, description, options) =>
@@ -59,57 +69,3 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
   notifyInfo: (title, description, options) =>
     get().showNotification(title, description, "info", options),
 }));
-
-export function useNotifications() {
-  const toast = useToast();
-
-  const showNotification = (
-    title: string,
-    description: string = "",
-    status: NotificationStatus = "info",
-    options?: UseToastOptions
-  ) => {
-    toast({
-      title: title,
-      description: description,
-      status: status,
-      duration: 5000,
-      isClosable: true,
-      position: "top-right",
-      variant: "subtle",
-      ...options,
-    });
-  };
-
-  const notifySuccess = (
-    title: string,
-    description?: string,
-    options?: UseToastOptions
-  ) => showNotification(title, description, "success", options);
-
-  const notifyError = (
-    title: string,
-    description?: string,
-    options?: UseToastOptions
-  ) => showNotification(title, description, "error", options);
-
-  const notifyWarning = (
-    title: string,
-    description?: string,
-    options?: UseToastOptions
-  ) => showNotification(title, description, "warning", options);
-
-  const notifyInfo = (
-    title: string,
-    description?: string,
-    options?: UseToastOptions
-  ) => showNotification(title, description, "info", options);
-
-  return {
-    showNotification,
-    notifySuccess,
-    notifyError,
-    notifyWarning,
-    notifyInfo,
-  };
-}

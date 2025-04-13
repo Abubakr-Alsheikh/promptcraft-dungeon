@@ -16,41 +16,26 @@ import {
   SliderThumb,
   HStack,
   Text,
-  Switch,
   useColorMode,
   Select,
+  Switch,
 } from "@chakra-ui/react";
-import { useState } from "react"; // For local state if not using global state immediately
+import { useState, useEffect } from "react";
+import { useGameStore } from "@/store/gameStore";
 
-interface SettingsModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  // --- Props to connect to global state ---
-  // Example:
-  masterVolume: number;
-  onMasterVolumeChange: (value: number) => void;
-  effectsVolume: number;
-  onEffectsVolumeChange: (value: number) => void;
-  animationSpeed: number; // Representing speed, e.g., 10, 30, 50, 0 (instant)
-  onAnimationSpeedChange: (speed: number) => void;
-  // --- End Example Props ---
-}
+export function SettingsModal() {
+  const isOpen = useGameStore((state) => state.isSettingsOpen);
+  const toggleSettings = useGameStore((state) => state.toggleSettings);
+  const initialMasterVolume = useGameStore((state) => state.masterVolume);
+  const setMasterVolume = useGameStore((state) => state.setMasterVolume);
+  const initialEffectsVolume = useGameStore((state) => state.effectsVolume);
+  const setEffectsVolume = useGameStore((state) => state.setEffectsVolume);
+  const initialAnimationSpeed = useGameStore((state) => state.animationSpeed);
+  const setAnimationSpeed = useGameStore((state) => state.setAnimationSpeed);
 
-export function SettingsModal({
-  isOpen,
-  onClose,
-  // --- Destructure props ---
-  masterVolume: initialMasterVolume,
-  onMasterVolumeChange,
-  effectsVolume: initialEffectsVolume,
-  onEffectsVolumeChange,
-  animationSpeed: initialAnimationSpeed,
-  onAnimationSpeedChange,
-}: SettingsModalProps) {
   const { colorMode, toggleColorMode } = useColorMode();
 
-  // Local state for sliders (update global state on change commit or drag end)
-  // This provides better performance than updating global state on every tiny slider move
+  // --- Local state for smoother slider interaction ---
   const [localMasterVolume, setLocalMasterVolume] =
     useState(initialMasterVolume);
   const [localEffectsVolume, setLocalEffectsVolume] =
@@ -59,26 +44,45 @@ export function SettingsModal({
     initialAnimationSpeed
   );
 
+  // Sync local state if global state changes externally (e.g., hydration)
+  useEffect(() => {
+    setLocalMasterVolume(initialMasterVolume);
+  }, [initialMasterVolume]);
+
+  useEffect(() => {
+    setLocalEffectsVolume(initialEffectsVolume);
+  }, [initialEffectsVolume]);
+
+  useEffect(() => {
+    setLocalAnimationSpeed(initialAnimationSpeed);
+  }, [initialAnimationSpeed]);
+
   const handleMasterVolumeSliderChangeEnd = (value: number) => {
-    onMasterVolumeChange(value); // Update global state
+    setMasterVolume(value);
   };
   const handleEffectsVolumeSliderChangeEnd = (value: number) => {
-    onEffectsVolumeChange(value); // Update global state
+    setEffectsVolume(value);
   };
   const handleAnimationSpeedChange = (
     event: React.ChangeEvent<HTMLSelectElement>
   ) => {
     const speed = parseInt(event.target.value, 10);
     setLocalAnimationSpeed(speed);
-    onAnimationSpeedChange(speed); // Update global state
+    setAnimationSpeed(speed);
   };
 
+  const handleClose = () => toggleSettings(false);
+
+  if (!isOpen) {
+    return null;
+  }
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="lg">
+    <Modal isOpen={isOpen} onClose={handleClose} size="lg" isCentered>
       <ModalOverlay bg="blackAlpha.700" backdropFilter="blur(5px)" />
       <ModalContent
-        bg="brand.bgDark"
-        color="brand.textLight"
+        bg="brand.bg"
+        color="brand.text"
         borderWidth={1}
         borderColor="brand.primary"
       >
@@ -98,10 +102,10 @@ export function SettingsModal({
                   min={0}
                   max={100}
                   step={1}
-                  value={localMasterVolume} // Use local state for controlled input
-                  onChange={setLocalMasterVolume} // Update local state during drag
-                  onChangeEnd={handleMasterVolumeSliderChangeEnd} // Update global state on release
-                  colorScheme="yellow" // Use accent color
+                  value={localMasterVolume}
+                  onChange={setLocalMasterVolume}
+                  onChangeEnd={handleMasterVolumeSliderChangeEnd}
+                  colorScheme="yellow"
                   focusThumbOnChange={false}
                 >
                   <SliderTrack bg="gray.600">
@@ -158,11 +162,11 @@ export function SettingsModal({
                 _hover={{ borderColor: "brand.secondary" }}
                 focusBorderColor="brand.primary"
               >
-                <option value="50">Fast</option>
-                <option value="30">Medium</option>
-                <option value="15">Slow</option>
-                <option value="1000">Very Fast (Debug)</option>
-                <option value="0">Instant</option>
+                <option value={50}>Fast</option>
+                <option value={30}>Medium</option>
+                <option value={15}>Slow</option>
+                <option value={1000}>Very Fast (Debug)</option>
+                <option value={0}>Instant</option>
               </Select>
             </FormControl>
 
@@ -175,14 +179,19 @@ export function SettingsModal({
                 id="theme-toggle"
                 isChecked={colorMode === "dark"}
                 onChange={toggleColorMode}
-                colorScheme="yellow" // Use accent color
+                colorScheme="yellow"
               />
             </FormControl>
           </VStack>
         </ModalBody>
 
         <ModalFooter borderTopWidth={1} borderColor="brand.primary">
-          <Button variant="outline" colorScheme="gray" onClick={onClose}>
+          <Button
+            variant="outline"
+            colorScheme="gray"
+            mr={3}
+            onClick={handleClose}
+          >
             Close
           </Button>
         </ModalFooter>

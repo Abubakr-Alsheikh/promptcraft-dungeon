@@ -13,31 +13,34 @@ import {
   Center,
 } from "@chakra-ui/react";
 import { ItemCard } from "./ItemCard";
-import { Item } from "@/types/game";
+import { useGameStore } from "@/store/gameStore";
 
-interface InventoryModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  items: Item[];
-  onUseItem?: (itemId: string) => void;
-  onEquipItem?: (itemId: string) => void;
-  onDropItem?: (itemId: string) => void;
-}
+export function InventoryModal() {
+  const isOpen = useGameStore((state) => state.isInventoryOpen);
+  const toggleInventory = useGameStore((state) => state.toggleInventory);
+  const items = useGameStore((state) => state.inventory);
+  const onUseItem = useGameStore((state) => state.useItem);
+  const onEquipItem = useGameStore((state) => state.equipItem);
+  const onDropItem = useGameStore((state) => state.dropItem);
 
-export function InventoryModal({
-  isOpen,
-  onClose,
-  items,
-  onUseItem,
-  onEquipItem,
-  onDropItem,
-}: InventoryModalProps) {
+  const handleClose = () => toggleInventory(false);
+
+  if (!isOpen) {
+    return null;
+  }
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="xl" scrollBehavior="inside">
+    <Modal
+      isOpen={isOpen}
+      onClose={handleClose}
+      size="xl"
+      scrollBehavior="inside"
+      isCentered
+    >
       <ModalOverlay bg="blackAlpha.700" backdropFilter="blur(5px)" />
       <ModalContent
         bg="brand.bgDark"
-        color="brand.textLight"
+        color="brand.text"
         borderWidth={1}
         borderColor="brand.primary"
       >
@@ -76,7 +79,12 @@ export function InventoryModal({
         </ModalBody>
 
         <ModalFooter borderTopWidth={1} borderColor="brand.primary">
-          <Button variant="outline" colorScheme="gray" mr={3} onClick={onClose}>
+          <Button
+            variant="outline"
+            colorScheme="gray"
+            mr={3}
+            onClick={handleClose}
+          >
             Close
           </Button>
         </ModalFooter>
